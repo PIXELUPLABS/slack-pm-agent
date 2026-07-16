@@ -48,7 +48,7 @@ const app = new App({
   ignoreSelf: false,
   clientId: process.env.SLACK_CLIENT_ID,
   clientSecret: process.env.SLACK_CLIENT_SECRET,
-  stateSecret: 'bolt-js-support-agent',
+  stateSecret: 'pixelup-slack-pm-agent',
   scopes: botScopes,
   installationStore,
   installerOptions: {

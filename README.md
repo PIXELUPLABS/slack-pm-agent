@@ -1,48 +1,40 @@
-# Casey: IT Support Agent
+# PIXELUP LABS Agent
 
-Meet Casey (it/this/that) — an AI-powered IT support agent that lives in Slack. Casey can troubleshoot common issues, search knowledge base articles, reset passwords, check system status, and create support tickets, all without leaving the conversation.
+An AI project-management agent that lives in the Pixelup Labs Slack. It handles the PM busywork between Slack, ClickUp, and Fireflies — task intake, project scaffolds, QA rounds, and client update drafts — so designers stay on design.
 
-Built with [Bolt for JavaScript](https://tools.slack.dev/bolt-js/).
+Built with [Bolt for JavaScript](https://tools.slack.dev/bolt-js/) and the [Claude Agent SDK](https://platform.claude.com/docs/en/agent-sdk/overview).
 
-## Choose Your Framework
+## What it does
 
-This repo contains the same app built with two different AI agent frameworks. Pick the one that fits your stack:
+* **Client task intake** — DM the bot ("add the design task Monumint shared today") or use the _Add to ClickUp_ message shortcut. It finds the client message, drafts the task with the right list, priority, and due date, and quotes the source message so nothing gets misread. One tap to approve → task lands in ClickUp.
+* **Client onboarding** — Send it an engagement guidelines doc. It cross-checks the Fireflies kickoff transcript and proposes the full project structure (lists, tasks, priorities, due dates) for review and approval.
+* **QA rounds** — Tag it in a QA thread when the round wraps. It dedupes and structures the comments (page, device, severity) and creates them as tasks in the QA list after approval.
+* **Tue/Fri client updates** — A scheduled run pulls the week's ClickUp activity and internal channel context per client, drafts the update in the agency voice, and posts it to an internal drafts channel for sign-off. A human sends every approved draft.
 
-| App | Directory | Get Started | Framework |
-|-----|-----------|-------------|-----------|
-| **Claude Agent SDK** | `claude-agent-sdk/` | [View README](./claude-agent-sdk/README.md) | [claude-agent-sdk](https://platform.claude.com/docs/en/agent-sdk/overview) |
-| **OpenAI Agents SDK** | `openai-agents-sdk/` | [View README](./openai-agents-sdk/README.md) | [openai-agents](https://openai.github.io/openai-agents-js/) |
+## How it's kept safe
 
-All implementations share the same Slack listener layer, the same five simulated IT tools, and the same user experience. The only difference is how the agent is defined and executed under the hood.
+The AI proposes; humans approve; plain code executes.
 
-## What Casey Can Do
+* Every ClickUp write is proposed as structured JSON, rendered as an Approve/Reject card in Slack, and executed by deterministic code only after an authorized tap.
+* The bot never posts in client channels — listener code drops those events before the agent ever runs.
+* No delete capability exists anywhere.
+* Role checks (who can trigger client-facing drafts or scaffolding) are enforced in listener code by Slack user ID, never via the prompt.
 
-Casey gives your team instant IT support through four entry points:
+## Getting started
 
-* **App Home** — Choose from common issue categories. A modal collects details, then Casey starts a DM thread with a resolution.
-* **Direct Messages** — Describe any IT issue and Casey responds in-thread, maintaining context across follow-ups.
-* **Channel @mentions** — Mention `@Casey` in any channel to get help without leaving the conversation.
-* **Assistant Panel** — Users click _Add Agent_ in Slack, select Casey, and pick from suggested prompts or describe an issue.
+**Using the bot?** Read the [Team Guide](./TEAM-GUIDE.md) — a one-pager for designers on how to work with the agent in Slack.
 
-Behind the scenes, Casey has access to five simulated tools: knowledge base search, support ticket creation, password reset, system status checks, and user permissions lookup.
+The app lives in [`claude-agent-sdk/`](./claude-agent-sdk/). See its [README](./claude-agent-sdk/README.md) for setup, [AGENTS.md](./claude-agent-sdk/AGENTS.md) for architecture and conventions, and [OWNERS-GUIDE.md](./claude-agent-sdk/OWNERS-GUIDE.md) for the plain-language guide to debugging, cost-tuning, and customizing the bot.
 
-> **Note:** All tools return simulated data for demonstration purposes. In a production app, these would connect to your actual IT systems.
+```sh
+cd claude-agent-sdk
+cp .env.sample .env   # Fill in ANTHROPIC_API_KEY, SLACK_BOT_TOKEN, SLACK_APP_TOKEN
+npm install
+npm run auth:clickup     # One-time OAuth sign-in for the ClickUp MCP server
+npm run auth:fireflies   # One-time OAuth sign-in for the Fireflies MCP server
+npm start
+```
 
-### Slack MCP Server
+## License
 
-Casey also works with the [Slack MCP Server](https://docs.slack.dev/ai/slack-mcp-server), giving it the ability to search messages and files, read channel history and threads, send messages, schedule messages, and create or update Slack canvases. When deployed with OAuth (HTTP mode), Casey automatically connects to the Slack MCP Server using the user's token, unlocking these capabilities on top of the built-in IT tools.
-
-## Using the App
-
-Once Casey is running, there are several ways to interact:
-
-* **App Home** — Open Casey in Slack and click the _Home_ tab. Choose from common issue categories, describe your issue in the modal, and Casey starts a DM thread with a resolution.
-* **Direct Messages** — Open a DM with Casey. Pick a suggested prompt or describe your issue, and Casey will reply in a thread.
-* **Channel @mentions** — Invite Casey to a channel by typing `/invite @Casey`, then type `@Casey` followed by your issue. Casey responds in a thread so the channel stays clean.
-* **Assistant Panel** — Click _Add Agent_ in the top-right corner of Slack, select Casey, and choose a suggested prompt like _Reset Password_, _Request Access_, or _Network Issues_.
-
-For full setup instructions, pick a framework above and follow the README in that directory.
-
-## Local Development
-
-This repo uses [`@slack/bolt`](https://www.npmjs.com/package/@slack/bolt) from npm.
+MIT — see [LICENSE](./LICENSE). Originally bootstrapped from Slack's [bolt-js-support-agent](https://github.com/slack-samples/bolt-js-support-agent) sample.
