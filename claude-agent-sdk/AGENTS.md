@@ -1,0 +1,125 @@
+# AGENTS.md - claude-agent-sdk
+
+JavaScript implementation of Pixelup Bot using the [Claude Agent SDK](https://platform.claude.com/docs/en/agent-sdk/overview) (`@anthropic-ai/claude-agent-sdk`).
+
+See the [root AGENTS.md](../AGENTS.md) for monorepo-wide architecture and shared patterns, and `.claude/CLAUDE.md` for the product spec and hard rules.
+
+## Setup
+
+```sh
+cp .env.sample .env   # Fill in ANTHROPIC_API_KEY, SLACK_BOT_TOKEN, SLACK_APP_TOKEN
+npm install
+npm run auth:clickup     # One-time OAuth sign-in for the ClickUp MCP server
+npm run auth:fireflies   # One-time OAuth sign-in for the Fireflies MCP server
+npm start
+```
+
+MCP auth is OAuth (PKCE + dynamic client registration): the `auth:*` scripts walk the browser flow once, save tokens to `data/mcp-auth/` (gitignored), and the bot refreshes them automatically. The app boots and runs without `ANTHROPIC_API_KEY` or MCP authorization — unauthorized servers don't attach and writes fail with clear errors pointing at the auth scripts.
+
+## Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `ANTHROPIC_API_KEY` | Anthropic API key |
+| `CLICKUP_MCP_TOKEN` | Optional static bearer override (skips OAuth for ClickUp) |
+| `CLICKUP_MCP_URL` | Optional override (default `https://mcp.clickup.com/mcp`) |
+| `FIREFLIES_MCP_TOKEN` | Optional static bearer override (skips OAuth for Fireflies) |
+| `FIREFLIES_MCP_URL` | Optional override (default `https://api.fireflies.ai/mcp`) |
+| `MCP_OAUTH_CALLBACK_PORT` | Localhost callback port for `npm run auth:*` (default 8976) |
+| `SLACK_BOT_TOKEN` | Bot token (`xoxb-`) |
+| `SLACK_APP_TOKEN` | App-level token (`xapp-`) for Socket Mode |
+| `SLACK_CLIENT_ID` | OAuth client ID (for `app-oauth.js`) |
+| `SLACK_CLIENT_SECRET` | OAuth client secret (for `app-oauth.js`) |
+| `SLACK_SIGNING_SECRET` | Signing secret (for `app-oauth.js`) |
+| `SLACK_REDIRECT_URI` | OAuth redirect URI (for `app-oauth.js`) |
+
+## Commands
+
+```sh
+npm install          # Install dependencies
+npm start            # Start the app
+npm run auth:clickup    # One-time OAuth flow for the ClickUp MCP server
+npm run auth:fireflies  # One-time OAuth flow for the Fireflies MCP server
+npm run lint         # Biome lint and format check
+npm run lint:fix     # Auto-fix lint and format issues
+npm run check        # Type check JavaScript with tsc (checkJs)
+```
+
+## Testing
+
+Tests use the Node.js built-in test runner (`node:test`) and assertion module (`node:assert`).
+
+```sh
+npm test             # Run all tests
+```
+
+### Conventions
+
+- Test files live in `tests/` and mirror the source directory structure
+- File naming: `<source-file>.test.js` (not `.spec.js`)
+- Use `describe()` / `it()` / `beforeEach()` blocks from `node:test`
+- Use `mock.fn()` from `node:test` for mocking — no external mock libraries
+- Assertions use `node:assert` (`strictEqual`, `ok`, `deepStrictEqual`)
+- Mock Slack client methods as `mock.fn()` objects with the needed nested structure
+- Test files use ES module `import` statements (`"type": "module"`)
+- No test may hit the network; integration modules are covered via missing-token error paths and injected fakes
+
+## Architecture
+
+### Folder map
+
+| Directory | Purpose |
+|-----------|---------|
+| `agent/` | `pixelup.js` (agent + system prompt) and `tools/` (tool factories) |
+| `approvals/` | Proposal store, Block Kit card builder, deterministic executor |
+| `config/` | `conventions.json` (single source of truth) + validated loader/helpers |
+| `integrations/` | MCP server config (`mcp-servers.js`), OAuth provider/token store (`mcp-auth.js`), executor's MCP write client (`clickup-mcp.js`) |
+| `scripts/` | `authorize-mcp.js` — one-time interactive OAuth flow (also prints the server's real tool names) |
+| `listeners/` | Bolt listeners: `events/`, `actions/`, `shortcuts/`, `views/` |
+| `schedules/` | Tue/Fri client-update draft scheduler |
+| `thread-context/` | `SessionStore` for Claude session IDs |
+
+### Agent Layer
+
+The agent is defined in `agent/pixelup.js`:
+
+- `runPixelupAgent(text, sessionId, deps)` wraps `query()` from the SDK
+- Model pinned to `claude-sonnet-5`; `maxTurns` capped to bound token spend
+- System prompt + conventions summary are built once at module load so the prompt stays stable for Anthropic prompt caching
+- Local tools are factories in `agent/tools/` wrapped in an in-process MCP server (`pixelup-tools`) via `createSdkMcpServer()`
+- ClickUp and Fireflies attach as external HTTP MCP servers when their tokens are set; the agent may only call the **read-only tools named in the allowlist** (no wildcards) — every write/delete tool those servers expose is denied
+- `permissionMode: 'default'` + explicit `allowedTools` is the enforcement mechanism; do not switch to `bypassPermissions` (it would unlock external write/delete tools)
+
+### Approval pipeline
+
+Agent `propose_*` tool → structured JSON in `approvals/store.js` → Block Kit card (`approvals/card-builder.js`) → Approve/Reject buttons (`listeners/actions/approval-buttons.js`, permission-checked against config roles) → `approvals/executor.js` performs the ClickUp write deterministically via `integrations/clickup-mcp.js` (an MCP client calling named create/update tools — no delete calls exist). Client updates execute as a no-op: approval marks the draft ready for a human to send.
+
+### Conversation Management
+
+`thread-context/store.js` exports a `SessionStore` that stores **session IDs only** (not full message history). The Claude Agent SDK manages conversation history server-side. The store passes `{ resume: sessionId }` on subsequent turns to continue a conversation.
+
+The store uses a `Map` keyed by `${channelId}:${threadTs}` with TTL-based cleanup and a max entry limit. `approvals/store.js` follows the same pattern for proposals.
+
+### Permission & safety gates (in code, never in the prompt)
+
+- `listeners/events/*` drop any event in a configured client channel — the bot never posts there
+- `propose_project_scaffold` / `propose_client_update` require the `lead` role
+- Approval buttons re-check roles before executing
+- The agent's external MCP allowlist is read-only; `integrations/clickup-mcp.js` implements no delete call
+
+### Tool Definitions
+
+Tools are created by factories in `agent/tools/` using `tool()` from the Claude Agent SDK with Zod v4 schemas, returning MCP `CallToolResult` format:
+
+```js
+import { tool } from '@anthropic-ai/claude-agent-sdk';
+import { z } from 'zod';
+
+export function createMyTools(deps, conventions) {
+  return [
+    tool('tool_name', 'Terse description.', { query: z.string() }, async (args) => ({
+      content: [{ type: 'text', text: 'result' }],
+    })),
+  ];
+}
+```

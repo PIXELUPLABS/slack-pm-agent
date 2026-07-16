@@ -1,0 +1,37 @@
+{
+  "agency": {
+    "name": "Pixelup Labs",
+    "voice": "Friendly, direct, no fluff. Short sentences. Lead with what shipped, then what's next, then anything we need from the client."
+  },
+  "clickup": {
+    "task_name_format": "[{client}] {title}",
+    "priorities": { "urgent": 1, "high": 2, "normal": 3, "low": 4 },
+    "default_priority": "normal",
+    "statuses": ["to do", "in progress", "review", "done"],
+    "default_status": "to do"
+  },
+  "clients": {
+    "example-client": {
+      "display_name": "Example Client",
+      "channel_id": "C0000000000",
+      "internal_channel_id": "C0INTERNAL0",
+      "list_id": "900000000001",
+      "qa_list_id": "900000000002",
+      "folder_id": "800000000001"
+    }
+  },
+  "users": {
+    "U0000000LEAD": { "name": "Example Lead", "clickup_user_id": 10000001, "role": "lead" },
+    "U000000MEMBR": { "name": "Example Designer", "clickup_user_id": 10000002, "role": "member" }
+  },
+  "channels": {
+    "drafts_channel_id": ""
+  },
+  "client_updates": {
+    "enabled": false,
+    "days": ["tuesday", "friday"],
+    "hour": 9,
+    "minute": 0,
+    "timezone": "America/New_York"
+  }
+}

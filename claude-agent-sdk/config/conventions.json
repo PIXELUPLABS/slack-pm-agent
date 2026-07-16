@@ -1,0 +1,206 @@
+{
+  "agency": {
+    "name": "Pixelup Labs",
+    "voice": "Friendly, direct, no fluff. Short sentences. Lead with what shipped, then what's next, then anything we need from the client."
+  },
+  "clickup": {
+    "task_name_format": "{title}",
+    "priorities": {
+      "urgent": 1,
+      "high": 2,
+      "normal": 3,
+      "low": 4,
+      "p0": 1,
+      "p1": 2,
+      "p2": 3,
+      "p3": 4
+    },
+    "default_priority": "normal",
+    "statuses": ["new", "in progress", "done", "approved"],
+    "default_status": "new",
+    "qa_statuses": ["reported", "in dev fix", "ready for qa", "re-testing", "resolved", "Closed"],
+    "qa_default_status": "reported",
+    "project_stage_field": {
+      "id": "e514f88a-5b11-4e2c-b948-b591751cf793",
+      "options": {
+        "planning": "4721018f-fcbe-4408-a3be-df3ea2b2456e",
+        "visual design": "9b632f8c-fd5a-4a6b-925d-5969c19b9fb7",
+        "content": "c3c9a46e-b051-4bf8-9fd4-0e3d368e363c",
+        "dev": "49df1d44-79b5-4341-92b3-5f55b4f9f5f0",
+        "qa": "17e97f75-9b1d-4748-bc2d-3e212e9b12af"
+      }
+    }
+  },
+  "scaffold_template": {
+    "list_name": "Brand and website sprint",
+    "tasks": [
+      "Brand Workshop",
+      "Competitor Analysis",
+      "Brand Positioning/Messaging",
+      "Moodboarding",
+      "Visual Exploration",
+      "Logo Concepts",
+      "Brand Direction",
+      "Presentation",
+      "Brand Guidelines/ Assets",
+      "Web Design",
+      "Development",
+      "QA & Launch"
+    ]
+  },
+  "clients": {
+    "henrylabs": {
+      "display_name": "HenryLabs",
+      "channel_id": "C_TODO_HENRYLABS",
+      "list_id": "901614298437",
+      "qa_list_id": "901614478769",
+      "folder_id": "90169132708"
+    },
+    "pogo": {
+      "display_name": "Pogo",
+      "channel_id": "C_TODO_POGO",
+      "list_id": "901614298288",
+      "qa_list_id": "901614517984",
+      "folder_id": "90169132815"
+    },
+    "streamline": {
+      "display_name": "Streamline",
+      "channel_id": "C_TODO_STREAMLINE",
+      "list_id": "901614298573",
+      "qa_list_id": "901614575240",
+      "folder_id": "90169132903"
+    },
+    "anoncoin": {
+      "display_name": "Anoncoin",
+      "channel_id": "C_TODO_ANONCOIN",
+      "list_id": "901614298591",
+      "qa_list_id": "",
+      "folder_id": "90169133062"
+    },
+    "bland": {
+      "display_name": "Bland",
+      "channel_id": "C_TODO_BLAND",
+      "list_id": "901614298596",
+      "qa_list_id": "901615388606",
+      "folder_id": "90169133067"
+    },
+    "sully": {
+      "display_name": "Sully",
+      "channel_id": "C_TODO_SULLY",
+      "list_id": "901614390972",
+      "qa_list_id": "901614938778",
+      "folder_id": "90169207086"
+    },
+    "autumn": {
+      "display_name": "Autumn",
+      "channel_id": "C_TODO_AUTUMN",
+      "list_id": "901614394446",
+      "qa_list_id": "901614396250",
+      "folder_id": "90169210094"
+    },
+    "limelight": {
+      "display_name": "Limelight",
+      "channel_id": "C_TODO_LIMELIGHT",
+      "list_id": "901614838546",
+      "qa_list_id": "901615282119",
+      "folder_id": "90169561930"
+    },
+    "monumint": {
+      "display_name": "Monumint",
+      "channel_id": "C_TODO_MONUMINT",
+      "list_id": "901615029196",
+      "qa_list_id": "901615541652",
+      "folder_id": "90169709638"
+    },
+    "greptile": {
+      "display_name": "Greptile",
+      "channel_id": "C_TODO_GREPTILE",
+      "list_id": "901615128110",
+      "qa_list_id": "",
+      "folder_id": "90169789295"
+    },
+    "sainapse": {
+      "display_name": "Sainapse",
+      "channel_id": "C_TODO_SAINAPSE",
+      "list_id": "901615292643",
+      "qa_list_id": "",
+      "folder_id": "90169789301"
+    },
+    "revley": {
+      "display_name": "Revley",
+      "channel_id": "C_TODO_REVLEY",
+      "list_id": "901615340815",
+      "qa_list_id": "",
+      "folder_id": "90169959297"
+    },
+    "crossword": {
+      "display_name": "Crossword",
+      "channel_id": "C_TODO_CROSSWORD",
+      "list_id": "901615572984",
+      "qa_list_id": "",
+      "folder_id": "901610143537"
+    },
+    "demo-project": {
+      "display_name": "Demo Project",
+      "channel_id": "C_TODO_DEMO",
+      "list_id": "901615388537",
+      "qa_list_id": "901615876929",
+      "folder_id": "90169999399"
+    },
+    "marker": {
+      "display_name": "Marker",
+      "channel_id": "",
+      "internal_channel_id": "C0BF1BZRL07",
+      "list_id": "901615875495",
+      "qa_list_id": "901615877053",
+      "folder_id": "901610395686"
+    }
+  },
+  "users": {
+    "U09RKSU0QSX": {
+      "name": "Arjun Sharma",
+      "clickup_user_id": 222171677,
+      "role": "lead"
+    },
+    "U0760QB4EGZ": {
+      "name": "Daksh Aswal",
+      "clickup_user_id": 170455322,
+      "role": "lead"
+    },
+    "U09EDJSU2F4": {
+      "name": "Dhruv",
+      "clickup_user_id": 101029284,
+      "role": "member"
+    },
+    "U09RW8P7M9T": {
+      "name": "Kashish",
+      "clickup_user_id": 101030129,
+      "role": "member"
+    },
+    "U08GW0745H8": {
+      "name": "Rinkesh Bist",
+      "clickup_user_id": 101029288,
+      "role": "member"
+    },
+    "U0A5CBCQWSY": {
+      "name": "Krish Savani",
+      "clickup_user_id": 101030128,
+      "role": "member"
+    },
+    "U0AFB7QV8S0": {
+      "name": "Fahad",
+      "clickup_user_id": 101029285,
+      "role": "member"
+    }
+  },
+  "channels": {
+    "drafts_channel_id": ""
+  },
+  "client_updates": {
+    "enabled": false,
+    "days": ["tuesday", "friday"],
+    "hour": 9,
+    "minute": 0,
+    "timezone": "Asia/Kolkata"
+  }
+}

@@ -1,0 +1,27 @@
+# Build
+.bolt-js-build/
+node_modules/
+
+# Secrets & local state (env files, OAuth token stores, Slack installations)
+.env
+*/.env
+*/data/
+
+# Claude Code
+.claude/*.local.json
+
+# Git
+.worktrees/
+
+# macOS
+.DS_Store
+
+# Slack CLI
+.slack/apps.json
+.slack/apps.dev.json
+.slack/cache/
+.slack/config.json
+*/.slack/apps.json
+*/.slack/apps.dev.json
+*/.slack/cache/
+*/.slack/config.json

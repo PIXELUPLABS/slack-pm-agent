@@ -1,0 +1,197 @@
+import { addClientToConventions, formatTaskName, getClickUpUserId, resolvePriority } from '../config/index.js';
+import * as clickupDefault from '../integrations/clickup-mcp.js';
+
+/**
+ * Deterministic proposal executor. This is the ONLY code path that writes to
+ * ClickUp — the agent proposes, a human approves, this executes by calling
+ * the ClickUp MCP server as a client. There is no delete branch and the
+ * ClickUp MCP module exposes no delete call.
+ */
+
+/** Fields the executor will pass through on a task update. Anything else is dropped. */
+const UPDATABLE_FIELDS = ['name', 'description', 'priority', 'start_date', 'due_date', 'status', 'assignees'];
+
+/**
+ * @param {import('../config/index.js').Conventions} conventions
+ * @param {string | undefined} clientKey
+ * @returns {import('../config/index.js').ClientConfig}
+ */
+function requireClient(conventions, clientKey) {
+  const client = clientKey ? conventions.clients[clientKey] : undefined;
+  if (!client) throw new Error(`Unknown client "${clientKey}" — check config/conventions.json.`);
+  return client;
+}
+
+/**
+ * @param {string | undefined} dueDate - ISO date (YYYY-MM-DD) or undefined.
+ * @returns {number | undefined} Unix ms timestamp.
+ */
+function parseDueDate(dueDate) {
+  if (!dueDate) return undefined;
+  const ms = Date.parse(dueDate);
+  if (Number.isNaN(ms)) throw new Error(`Invalid due date "${dueDate}" — expected YYYY-MM-DD.`);
+  return ms;
+}
+
+/**
+ * Execute an approved proposal.
+ * @param {import('./store.js').Proposal} proposal
+ * @param {import('../config/index.js').Conventions} conventions
+ * @param {typeof clickupDefault} [clickup] - Injectable for tests.
+ * @returns {Promise<{ summary: string }>}
+ */
+export async function executeProposal(proposal, conventions, clickup = clickupDefault) {
+  const p = proposal.payload;
+
+  switch (proposal.type) {
+    case 'task': {
+      const client = requireClient(conventions, p.clientKey);
+      const assignee = p.assigneeSlackId ? getClickUpUserId(conventions, p.assigneeSlackId) : null;
+      const task = await clickup.createTask(client.list_id, {
+        name: formatTaskName(conventions, p.clientKey, p.title),
+        description: [p.description, p.sourceQuote ? `Source (Slack):\n${p.sourceQuote}` : '']
+          .filter(Boolean)
+          .join('\n\n'),
+        priority: resolvePriority(conventions, p.priority),
+        due_date: parseDueDate(p.dueDate),
+        assignees: assignee ? [assignee] : undefined,
+        status: conventions.clickup.default_status,
+      });
+      return { summary: `Task created: ${task.url ? `<${task.url}|${task.name}>` : task.name}` };
+    }
+
+    case 'task_update': {
+      /** @type {Record<string, any>} */
+      const fields = {};
+      for (const [key, value] of Object.entries(p.fields || {})) {
+        if (!UPDATABLE_FIELDS.includes(key)) continue;
+        if (key === 'priority') fields.priority = resolvePriority(conventions, String(value));
+        else if (key === 'due_date' || key === 'start_date') fields[key] = parseDueDate(String(value));
+        else fields[key] = value;
+      }
+      if (Object.keys(fields).length === 0) throw new Error('No updatable fields in this proposal.');
+      const task = await clickup.updateTask(p.taskId, fields);
+      return { summary: `Task updated: ${task.url ? `<${task.url}|${task.name}>` : task.name}` };
+    }
+
+    case 'qa_tasks': {
+      const client = requireClient(conventions, p.clientKey);
+      const links = [];
+      if (!client.qa_list_id) {
+        throw new Error(
+          `${p.clientKey} has no QA list mapped — duplicate "QA Board Demo" into the client's folder in ClickUp, ` +
+            'set qa_list_id in config/conventions.json, restart, and re-propose.',
+        );
+      }
+      for (const item of p.tasks || []) {
+        const prefix = [item.page, item.device].filter(Boolean).join(' / ');
+        const task = await clickup.createTask(client.qa_list_id, {
+          name: prefix ? `[${prefix}] ${item.title}` : item.title,
+          description: item.description || '',
+          priority: resolvePriority(conventions, item.severity),
+          // QA lists have their own pipeline (reported → in dev fix → …).
+          status: conventions.clickup.qa_default_status || conventions.clickup.default_status,
+        });
+        links.push(`• ${task.url ? `<${task.url}|${task.name}>` : task.name}`);
+      }
+      if (links.length === 0) throw new Error('No QA tasks in this proposal.');
+      return { summary: `${links.length} QA task(s) created:\n${links.join('\n')}` };
+    }
+
+    case 'scaffold': {
+      const client = requireClient(conventions, p.clientKey);
+      if (!p.tasks?.length) throw new Error('No tasks in this scaffold proposal.');
+      // Client folders are duplicated from the demo template, so the
+      // engagement list already exists — populate it, never create lists.
+      const stageFieldId = conventions.clickup.project_stage_field?.id;
+      const links = [];
+      /** @type {Map<string, string>} title → created task ID, for dependency wiring. */
+      const createdIds = new Map();
+      for (const taskSpec of p.tasks) {
+        const assignees = (taskSpec.assigneeSlackIds || [])
+          .map((/** @type {string} */ slackId) => getClickUpUserId(conventions, slackId))
+          .filter((/** @type {number | null} */ id) => id !== null);
+        const task = await clickup.createTask(client.list_id, {
+          name: taskSpec.title,
+          description: taskSpec.description || '',
+          priority: resolvePriority(conventions, taskSpec.priority),
+          start_date: parseDueDate(taskSpec.startDate),
+          due_date: parseDueDate(taskSpec.dueDate),
+          assignees: assignees.length > 0 ? /** @type {number[]} */ (assignees) : undefined,
+          status: conventions.clickup.default_status,
+          // Project Stage drives the board grouping in the template lists.
+          custom_fields:
+            stageFieldId && taskSpec.stageOptionId ? [{ id: stageFieldId, value: taskSpec.stageOptionId }] : undefined,
+        });
+        if (task.id) createdIds.set(taskSpec.title, task.id);
+        links.push(`• ${task.url ? `<${task.url}|${task.name}>` : task.name}`);
+      }
+
+      // Second pass: dependencies (needs all task IDs). Failures don't undo
+      // the scaffold — they're reported for manual linking.
+      /** @type {string[]} */
+      const depNotes = [];
+      for (const taskSpec of p.tasks) {
+        for (const blockerTitle of taskSpec.blockedBy || []) {
+          const taskId = createdIds.get(taskSpec.title);
+          const blockerId = createdIds.get(blockerTitle);
+          if (!taskId || !blockerId) {
+            depNotes.push(`:warning: Could not link "${taskSpec.title}" ← "${blockerTitle}" (missing task ID).`);
+            continue;
+          }
+          try {
+            await clickup.addTaskDependency(taskId, blockerId);
+          } catch (e) {
+            depNotes.push(
+              `:warning: Dependency "${taskSpec.title}" ← "${blockerTitle}" failed: ${/** @type {Error} */ (e).message}`,
+            );
+          }
+        }
+      }
+      const depCount = p.tasks.reduce(
+        (/** @type {number} */ n, /** @type {any} */ t) => n + (t.blockedBy?.length || 0),
+        0,
+      );
+      const depSummary = depCount > 0 ? `\n${depCount - depNotes.length}/${depCount} dependencies linked.` : '';
+      return {
+        summary: `${links.length} milestone task(s) added to *${p.clientKey}*'s engagement list:\n${links.join('\n')}${depSummary}${depNotes.length ? `\n${depNotes.join('\n')}` : ''}`,
+      };
+    }
+
+    case 'client_update':
+      // No external write: approval marks the draft ready. A human copies it
+      // into the client channel — the bot never posts there (hard rule).
+      return {
+        summary: 'Draft approved — ready for a human to copy and send. The bot never posts to client channels.',
+      };
+
+    case 'client_registration': {
+      // Writes to conventions.json (not ClickUp) and hot-reloads the config.
+      addClientToConventions(p.clientKey, p.entry);
+      const noteLines = p.notes?.length ? `\n${p.notes.map((/** @type {string} */ n) => `• ${n}`).join('\n')}` : '';
+      return {
+        summary: `Client *${p.entry.display_name}* registered as \`${p.clientKey}\` — config reloaded, no restart needed.${noteLines}`,
+      };
+    }
+
+    default:
+      throw new Error(`Unknown proposal type "${proposal.type}" — refusing to execute.`);
+  }
+}
+
+/**
+ * Who may approve what. Scaffolds and client updates are lead-only
+ * (client-facing); tasks and QA writes may be approved by the requester or
+ * any lead. Enforced here in code, never via the system prompt.
+ * @param {import('./store.js').Proposal} proposal
+ * @param {string} userId
+ * @param {import('../config/index.js').Conventions} conventions
+ * @returns {boolean}
+ */
+export function canApprove(proposal, userId, conventions) {
+  const role = conventions.users[userId]?.role;
+  if (proposal.type === 'scaffold' || proposal.type === 'client_update' || proposal.type === 'client_registration') {
+    return role === 'lead';
+  }
+  return role === 'lead' || (userId === proposal.requesterId && role !== undefined);
+}
