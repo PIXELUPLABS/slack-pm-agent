@@ -83,10 +83,37 @@ describe('executeProposal', () => {
     await assert.rejects(() => executeProposal(p, conventions(), fakeClickUp), /Unknown client "ghost"/);
   });
 
+  it('task: sets the Project Stage custom field when a stage was proposed', async () => {
+    const p = proposal({
+      type: 'task',
+      payload: {
+        clientKey: 'acme',
+        title: 'Blog page design',
+        stageName: 'visual design',
+        stageOptionId: 'opt-design',
+      },
+    });
+    const conv = conventions();
+    conv.clickup.project_stage_field = { id: 'field-1', options: { 'visual design': 'opt-design' } };
+    await executeProposal(p, conv, fakeClickUp);
+    // Stage rides as the Project Stage custom field (drives board grouping).
+    assert.deepStrictEqual(fakeClickUp.createTask.mock.calls[0].arguments[1].custom_fields, [
+      { id: 'field-1', value: 'opt-design' },
+    ]);
+  });
+
+  it('task: omits custom_fields when no stage was proposed', async () => {
+    const p = proposal({ type: 'task', payload: { clientKey: 'acme', title: 'Blog page design' } });
+    const conv = conventions();
+    conv.clickup.project_stage_field = { id: 'field-1', options: { 'visual design': 'opt-design' } };
+    await executeProposal(p, conv, fakeClickUp);
+    assert.strictEqual(fakeClickUp.createTask.mock.calls[0].arguments[1].custom_fields, undefined);
+  });
+
   it('task_update: passes only whitelisted fields', async () => {
     const p = proposal({
       type: 'task_update',
-      payload: { taskId: 't9', fields: { status: 'done', priority: 'urgent', sneaky_field: 'x' } },
+      payload: { updates: [{ taskId: 't9', fields: { status: 'done', priority: 'urgent', sneaky_field: 'x' } }] },
     });
     await executeProposal(p, conventions(), fakeClickUp);
     const [taskId, fields] = fakeClickUp.updateTask.mock.calls[0].arguments;
@@ -94,9 +121,61 @@ describe('executeProposal', () => {
     assert.deepStrictEqual(fields, { status: 'done', priority: 1 });
   });
 
+  it('task_update: executes a batch of tasks from one proposal', async () => {
+    const p = proposal({
+      type: 'task_update',
+      payload: {
+        updates: [
+          { taskId: 't1', taskName: 'Blog page design', fields: { stage: 'visual design' } },
+          { taskId: 't2', taskName: 'Blog page development', fields: { stage: 'dev' } },
+        ],
+      },
+    });
+    const conv = conventions();
+    conv.clickup.project_stage_field = { id: 'field-1', options: { 'visual design': 'opt-design', dev: 'opt-dev' } };
+    const result = await executeProposal(p, conv, fakeClickUp);
+    assert.strictEqual(fakeClickUp.updateTask.mock.callCount(), 2);
+    assert.deepStrictEqual(fakeClickUp.updateTask.mock.calls[0].arguments[1], {
+      custom_fields: [{ id: 'field-1', value: 'opt-design' }],
+    });
+    assert.deepStrictEqual(fakeClickUp.updateTask.mock.calls[1].arguments[1], {
+      custom_fields: [{ id: 'field-1', value: 'opt-dev' }],
+    });
+    assert.ok(result.summary.includes('2 task(s) updated'));
+    assert.ok(result.summary.includes('Blog page design'));
+  });
+
+  it('task_update: legacy single-task payload still executes', async () => {
+    const p = proposal({ type: 'task_update', payload: { taskId: 't9', fields: { status: 'done' } } });
+    await executeProposal(p, conventions(), fakeClickUp);
+    const [taskId, fields] = fakeClickUp.updateTask.mock.calls[0].arguments;
+    assert.strictEqual(taskId, 't9');
+    assert.deepStrictEqual(fields, { status: 'done' });
+  });
+
   it('task_update: rejects when nothing updatable remains', async () => {
-    const p = proposal({ type: 'task_update', payload: { taskId: 't9', fields: { bogus: '1' } } });
+    const p = proposal({ type: 'task_update', payload: { updates: [{ taskId: 't9', fields: { bogus: '1' } }] } });
     await assert.rejects(() => executeProposal(p, conventions(), fakeClickUp), /No updatable fields/);
+  });
+
+  it('task_update: translates stage into the Project Stage custom field', async () => {
+    const p = proposal({ type: 'task_update', payload: { updates: [{ taskId: 't9', fields: { stage: 'dev' } }] } });
+    const conv = conventions();
+    conv.clickup.project_stage_field = { id: 'field-1', options: { dev: 'opt-dev' } };
+    await executeProposal(p, conv, fakeClickUp);
+    const [taskId, fields] = fakeClickUp.updateTask.mock.calls[0].arguments;
+    assert.strictEqual(taskId, 't9');
+    assert.deepStrictEqual(fields, { custom_fields: [{ id: 'field-1', value: 'opt-dev' }] });
+  });
+
+  it('task_update: rejects a stage that does not resolve', async () => {
+    const p = proposal({
+      type: 'task_update',
+      payload: { updates: [{ taskId: 't9', fields: { stage: 'shipping' } }] },
+    });
+    const conv = conventions();
+    conv.clickup.project_stage_field = { id: 'field-1', options: { dev: 'opt-dev' } };
+    await assert.rejects(() => executeProposal(p, conv, fakeClickUp), /Unknown stage "shipping"/);
   });
 
   it('qa_tasks: creates each task in the QA list with severity mapped to priority', async () => {

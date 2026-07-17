@@ -1,5 +1,6 @@
 import { addClientToConventions, formatTaskName, getClickUpUserId, resolvePriority } from '../config/index.js';
 import * as clickupDefault from '../integrations/clickup-mcp.js';
+import { resolveStage } from './scaffold-rules.js';
 
 /**
  * Deterministic proposal executor. This is the ONLY code path that writes to
@@ -9,7 +10,7 @@ import * as clickupDefault from '../integrations/clickup-mcp.js';
  */
 
 /** Fields the executor will pass through on a task update. Anything else is dropped. */
-const UPDATABLE_FIELDS = ['name', 'description', 'priority', 'start_date', 'due_date', 'status', 'assignees'];
+const UPDATABLE_FIELDS = ['name', 'description', 'priority', 'start_date', 'due_date', 'status', 'assignees', 'stage'];
 
 /**
  * @param {import('../config/index.js').Conventions} conventions
@@ -47,6 +48,7 @@ export async function executeProposal(proposal, conventions, clickup = clickupDe
     case 'task': {
       const client = requireClient(conventions, p.clientKey);
       const assignee = p.assigneeSlackId ? getClickUpUserId(conventions, p.assigneeSlackId) : null;
+      const stageFieldId = conventions.clickup.project_stage_field?.id;
       const task = await clickup.createTask(client.list_id, {
         name: formatTaskName(conventions, p.clientKey, p.title),
         description: [p.description, p.sourceQuote ? `Source (Slack):\n${p.sourceQuote}` : '']
@@ -56,22 +58,44 @@ export async function executeProposal(proposal, conventions, clickup = clickupDe
         due_date: parseDueDate(p.dueDate),
         assignees: assignee ? [assignee] : undefined,
         status: conventions.clickup.default_status,
+        // Project Stage drives the board grouping in the template lists.
+        custom_fields: stageFieldId && p.stageOptionId ? [{ id: stageFieldId, value: p.stageOptionId }] : undefined,
       });
       return { summary: `Task created: ${task.url ? `<${task.url}|${task.name}>` : task.name}` };
     }
 
     case 'task_update': {
-      /** @type {Record<string, any>} */
-      const fields = {};
-      for (const [key, value] of Object.entries(p.fields || {})) {
-        if (!UPDATABLE_FIELDS.includes(key)) continue;
-        if (key === 'priority') fields.priority = resolvePriority(conventions, String(value));
-        else if (key === 'due_date' || key === 'start_date') fields[key] = parseDueDate(String(value));
-        else fields[key] = value;
+      // Batch payload ({ updates: [...] }); single-task legacy shape normalizes to a one-entry batch.
+      const updates = p.updates || [{ taskId: p.taskId, fields: p.fields }];
+      const results = [];
+      for (const update of updates) {
+        /** @type {Record<string, any>} */
+        const fields = {};
+        for (const [key, value] of Object.entries(update.fields || {})) {
+          if (!UPDATABLE_FIELDS.includes(key)) continue;
+          if (key === 'priority') fields.priority = resolvePriority(conventions, String(value));
+          else if (key === 'due_date' || key === 'start_date') fields[key] = parseDueDate(String(value));
+          else if (key === 'stage') {
+            // Stage is the Project Stage dropdown custom field, not a native field.
+            const stage = resolveStage(conventions, String(value));
+            const stageFieldId = conventions.clickup.project_stage_field?.id;
+            if (!stage || !stageFieldId) throw new Error(`Unknown stage "${value}" — check config/conventions.json.`);
+            fields.custom_fields = [{ id: stageFieldId, value: stage.optionId }];
+          } else fields[key] = value;
+        }
+        if (Object.keys(fields).length === 0) {
+          throw new Error(`No updatable fields for task ${update.taskId} in this proposal.`);
+        }
+        const task = await clickup.updateTask(update.taskId, fields);
+        const label = update.taskName || task.name;
+        results.push(task.url ? `<${task.url}|${label}>` : label);
       }
-      if (Object.keys(fields).length === 0) throw new Error('No updatable fields in this proposal.');
-      const task = await clickup.updateTask(p.taskId, fields);
-      return { summary: `Task updated: ${task.url ? `<${task.url}|${task.name}>` : task.name}` };
+      return {
+        summary:
+          results.length === 1
+            ? `Task updated: ${results[0]}`
+            : `${results.length} task(s) updated:\n${results.map((r) => `• ${r}`).join('\n')}`,
+      };
     }
 
     case 'qa_tasks': {

@@ -1,6 +1,8 @@
 {
   "display_information": {
-    "name": "PIXELUP LABS Agent"
+    "name": "PIXELUP LABS Agent",
+    "description": "AI Project Manager",
+    "background_color": "#2e2f30"
   },
   "features": {
     "agent_view": {

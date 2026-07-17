@@ -22,6 +22,7 @@ function summarizePayload(proposal) {
   switch (proposal.type) {
     case 'task': {
       const lines = [`*Title:* ${p.title}`, `*Client:* ${p.clientKey}`, `*Priority:* ${p.priority || 'default'}`];
+      if (p.stageName) lines.push(`*Stage:* ${p.stageName}`);
       if (p.dueDate) lines.push(`*Due:* ${p.dueDate}`);
       if (p.assigneeName) lines.push(`*Assignee:* ${p.assigneeName}`);
       if (p.description) lines.push(`*Details:* ${p.description}`);
@@ -29,10 +30,16 @@ function summarizePayload(proposal) {
       return lines.join('\n');
     }
     case 'task_update': {
-      const changes = Object.entries(p.fields || {})
-        .map(([key, value]) => `• ${key} → ${value}`)
-        .join('\n');
-      return `*Task:* \`${p.taskId}\`\n*Changes:*\n${changes}`;
+      // Batch payload ({ updates: [...] }); single-task legacy shape normalizes to a one-entry batch.
+      const updates = p.updates || [{ taskId: p.taskId, fields: p.fields }];
+      const perTask = updates.map((/** @type {any} */ u) => {
+        const changes = Object.entries(u.fields || {})
+          .map(([key, value]) => `${key} → ${value}`)
+          .join(', ');
+        return `• ${u.taskName ? `${u.taskName} (\`${u.taskId}\`)` : `\`${u.taskId}\``}: ${changes}`;
+      });
+      const heading = updates.length === 1 ? '*Changes:*' : `*Changes to ${updates.length} tasks:*`;
+      return `${heading}\n${perTask.join('\n')}`;
     }
     case 'qa_tasks': {
       const items = (p.tasks || [])

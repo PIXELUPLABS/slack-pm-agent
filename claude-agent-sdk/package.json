@@ -6,6 +6,7 @@
   "scripts": {
     "auth:clickup": "node scripts/authorize-mcp.js clickup",
     "auth:fireflies": "node scripts/authorize-mcp.js fireflies",
+    "sync:channels": "node scripts/sync-channel-ids.js",
     "check": "npx tsc --checkJs --noEmit --skipLibCheck --esModuleInterop --target esnext --module nodenext --moduleResolution nodenext app.js",
     "start": "node app.js",
     "lint": "npx @biomejs/biome check .",

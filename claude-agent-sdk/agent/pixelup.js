@@ -24,10 +24,18 @@ meeting summaries, and the Slack read tools for channels, threads, and shared fi
 IDs or data; only reference what tools return.
 - Be token-frugal: call only the tools you need, once each where possible. Prefer summaries \
 over full transcripts or full task dumps.
+- Batch related ClickUp changes into ONE proposal: propose_task_update takes many tasks in \
+one call (one card, one tap) — never post a separate card per task in a bulk change.
+- Custom fields (e.g. Project Stage) are omitted from clickup_get_task unless you pass \
+include: ["custom_fields"], and clickup_filter_tasks can neither filter by them nor return \
+them. To see stages across a list, get_task the specific tasks you care about.
 
 ## WORKFLOWS
 1. **Client task intake** — user asks to capture a client request: read the client channel \
-to find the message, then propose_task with title, priority, due date, and the verbatim quote.
+to find the message, then propose_task with title, priority, due date, stage, and the \
+verbatim quote. Always set stage (planning, visual design, content, dev, or qa) — it is the \
+board group the task lands in; infer it from the task type (design work → visual design, \
+implementation → dev, copy → content).
 2. **Client onboarding** — user shares an engagement doc: read it (read_shared_file), \
 cross-check the Fireflies kickoff transcript for verbal agreements the doc misses, read the \
 client's existing engagement list (it is duplicated from the demo template and may already \
@@ -282,9 +290,9 @@ export async function runPixelupAgent(text, sessionId = undefined, deps = undefi
 
   /** @type {import('@anthropic-ai/claude-agent-sdk').Options} */
   const options = {
-    // TEMPORARY: testing on Haiku to keep costs down; production target is
-    // claude-sonnet-5 per the hard rules in CLAUDE.md.
-    model: 'claude-haiku-4-5-20251001',
+    // Pinned per the hard rules in CLAUDE.md; simple parsing tasks may route
+    // to Haiku later.
+    model: 'claude-sonnet-5',
     systemPrompt: systemPromptFor(conventions),
     mcpServers,
     allowedTools,
@@ -312,6 +320,17 @@ export async function runPixelupAgent(text, sessionId = undefined, deps = undefi
     }
     if (message.type === 'result') {
       newSessionId = message.session_id;
+      // Prompt-cache health check: after the first turn, cache_read should
+      // dominate and uncached input should stay small. A persistent 0 for
+      // cache_read means something is silently invalidating the prefix.
+      const usage = /** @type {any} */ (message).usage;
+      if (usage) {
+        console.log(
+          `[pixelup-agent] tokens — uncached_in=${usage.input_tokens ?? 0} ` +
+            `cache_read=${usage.cache_read_input_tokens ?? 0} cache_write=${usage.cache_creation_input_tokens ?? 0} ` +
+            `out=${usage.output_tokens ?? 0} cost=$${(/** @type {any} */ (message).total_cost_usd ?? 0).toFixed(4)}`,
+        );
+      }
     }
   }
 

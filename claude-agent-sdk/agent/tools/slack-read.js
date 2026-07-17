@@ -20,6 +20,86 @@ function compactMessages(messages) {
     .join('\n');
 }
 
+/** @param {string | undefined} value @returns {boolean} Real Slack channel ID (not a C_TODO_* placeholder). */
+function looksLikeChannelId(value) {
+  return /^[CDG][A-Z0-9]{5,}$/.test(value || '');
+}
+
+/**
+ * Resolve the tool's channel argument from config alone: a client key
+ * (external client channel), "{key}-internal" / "{key}-pixelup", or a raw
+ * channel ID. When config can't produce a real ID, returns the channel NAME
+ * to look up live in Slack instead — config accelerates resolution but never
+ * gates reading.
+ * @param {import('../../config/index.js').Conventions} conventions
+ * @param {string} channel
+ * @returns {{ id?: string, lookupName?: string }}
+ */
+export function resolveChannelArg(conventions, channel) {
+  const clients = conventions.clients;
+  const name = channel.replace(/^#/, '');
+  if (looksLikeChannelId(name)) return { id: name };
+  let key = null;
+  let kind = /** @type {'external' | 'internal'} */ ('external');
+  if (clients[name]) {
+    key = name;
+  } else {
+    const match = name.match(/^(.+)-(internal|pixelup)$/);
+    if (match && clients[match[1]]) {
+      key = match[1];
+      kind = match[2] === 'internal' ? 'internal' : 'external';
+    }
+  }
+  if (key) {
+    const id = kind === 'internal' ? clients[key].internal_channel_id : clients[key].channel_id;
+    if (looksLikeChannelId(id)) return { id };
+    // Bare client key → the external channel's conventional name.
+    return { lookupName: key === name ? `${key}-pixelup` : name };
+  }
+  return { lookupName: name };
+}
+
+/**
+ * Live name→ID lookup over the channels visible to the bot, cached briefly so
+ * repeated tool calls in one conversation don't re-list the workspace.
+ * @type {{ at: number, byName: Map<string, string> }}
+ */
+let channelCache = { at: 0, byName: new Map() };
+const CHANNEL_CACHE_TTL_MS = 5 * 60 * 1000;
+
+/** Test hook. @param {{ at: number, byName: Map<string, string> }} [cache] */
+export function resetChannelCache(cache) {
+  channelCache = cache || { at: 0, byName: new Map() };
+}
+
+/**
+ * @param {import('@slack/web-api').WebClient} client
+ * @param {string} name
+ * @returns {Promise<string | undefined>}
+ */
+export async function lookupChannelIdByName(client, name) {
+  if (channelCache.byName.has(name)) return channelCache.byName.get(name);
+  if (Date.now() - channelCache.at < CHANNEL_CACHE_TTL_MS) return undefined;
+  /** @type {Map<string, string>} */
+  const byName = new Map();
+  /** @type {string | undefined} */
+  let cursor;
+  do {
+    const res = await client.conversations.list({
+      types: 'public_channel,private_channel',
+      exclude_archived: true,
+      limit: 200,
+      cursor,
+    });
+    for (const c of res.channels || []) {
+      if (c.name && c.id) byName.set(c.name, c.id);
+    }
+    cursor = res.response_metadata?.next_cursor || undefined;
+  } while (cursor);
+  channelCache = { at: Date.now(), byName };
+  return byName.get(name);
+}
+
 /**
  * Read-only Slack tools scoped to what the workflows need: reading client
  * channels for task intake, reading QA threads, and reading shared files
@@ -31,20 +111,32 @@ function compactMessages(messages) {
 export function createSlackReadTools(deps, conventions) {
   const readChannelMessages = tool(
     'read_channel_messages',
-    'Recent messages from a channel. Accepts a client key from conventions or a raw channel ID. Read-only.',
+    'Recent messages from any channel the bot is in. Accepts a client key (external client channel), ' +
+      'a channel name (e.g. "monumint-internal"), or a raw channel ID. Read-only.',
     {
-      channel: z.string().describe('Client key or Slack channel ID.'),
+      channel: z.string().describe('Client key, channel name, or Slack channel ID.'),
       limit: z.number().int().min(1).max(30).optional().describe('Default 15.'),
     },
     async ({ channel, limit }) => {
       try {
-        const channelId = conventions.clients[channel]?.channel_id || channel;
+        const resolved = resolveChannelArg(conventions, channel);
+        let channelId = resolved.id;
+        if (!channelId && resolved.lookupName) {
+          channelId = await lookupChannelIdByName(deps.client, resolved.lookupName);
+        }
+        if (!channelId) {
+          return asResult(
+            `No channel named #${resolved.lookupName || channel} is visible to the bot. Private channels require ` +
+              'the bot to be invited (/invite it there). Double-check the exact channel name with the user.',
+          );
+        }
         const result = await deps.client.conversations.history({ channel: channelId, limit: limit || 15 });
         const text = compactMessages(result.messages || []);
         return asResult(text || 'No messages found.');
       } catch (e) {
         const err = /** @type {any} */ (e);
-        return asResult(`Could not read channel: ${err.data?.error || err.message}`);
+        const hint = err.data?.error === 'not_in_channel' ? ' (the bot must be invited to the channel first)' : '';
+        return asResult(`Could not read channel: ${err.data?.error || err.message}${hint}`);
       }
     },
   );

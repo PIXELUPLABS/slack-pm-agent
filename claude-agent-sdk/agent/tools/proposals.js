@@ -62,16 +62,28 @@ export function createProposalTools(deps, conventions) {
     description: z.string().optional(),
     priority: z.string().optional().describe('Priority name from conventions.'),
     due_date: z.string().optional().describe('YYYY-MM-DD'),
+    stage: z
+      .string()
+      .optional()
+      .describe('Project Stage board group: planning, visual design, content, dev, or qa. Infer from the task type.'),
     assignee_slack_id: z.string().optional(),
     source_quote: z.string().optional().describe('Verbatim client message this task is based on.'),
   };
 
   const proposeTask = tool(
     'propose_task',
-    'Propose one ClickUp task for approval. Always include source_quote when the task comes from a client message.',
+    'Propose one ClickUp task for approval. Set stage so the task lands in the right board group. Always include source_quote when the task comes from a client message.',
     taskSchema,
-    ({ client_key, title, description, priority, due_date, assignee_slack_id, source_quote }) =>
-      postProposal(
+    ({ client_key, title, description, priority, due_date, stage, assignee_slack_id, source_quote }) => {
+      const resolvedStage = resolveStage(conventions, stage);
+      if (stage && !resolvedStage) {
+        return Promise.resolve(
+          asResult(
+            `Unknown stage "${stage}". Valid stages: ${Object.keys(conventions.clickup.project_stage_field?.options || {}).join(', ')}.`,
+          ),
+        );
+      }
+      return postProposal(
         'task',
         {
           clientKey: client_key,
@@ -79,33 +91,61 @@ export function createProposalTools(deps, conventions) {
           description,
           priority,
           dueDate: snapDueDateToWeekday(due_date),
+          stageName: resolvedStage?.name,
+          stageOptionId: resolvedStage?.optionId,
           assigneeSlackId: assignee_slack_id,
           assigneeName: assignee_slack_id ? conventions.users[assignee_slack_id]?.name : undefined,
           sourceQuote: source_quote,
         },
         client_key,
-      ),
+      );
+    },
   );
 
   const proposeTaskUpdate = tool(
     'propose_task_update',
-    'Propose changes to an existing ClickUp task (name, description, priority, due_date, status).',
+    'Propose changes to one or more existing ClickUp tasks (name, description, priority, due_date, status, stage). ' +
+      'Batch ALL related changes into ONE call — the approver gets a single card and taps once.',
     {
-      task_id: z.string(),
-      fields: z
-        .record(z.string(), z.string())
-        .describe(
-          'Field → new value. Allowed: name, description, priority, start_date, due_date (YYYY-MM-DD), status.',
-        ),
+      updates: z
+        .array(
+          z.object({
+            task_id: z.string(),
+            task_name: z.string().optional().describe('Task name, shown on the approval card.'),
+            fields: z
+              .record(z.string(), z.string())
+              .describe(
+                'Field → new value. Allowed: name, description, priority, start_date, due_date (YYYY-MM-DD), status, ' +
+                  'stage (Project Stage board group: planning, visual design, content, dev, or qa).',
+              ),
+          }),
+        )
+        .min(1),
     },
-    ({ task_id, fields }) => {
-      // Weekend dates snap per the agency calendar rule before the card renders.
-      const adjusted = { ...fields };
-      if (adjusted.due_date) adjusted.due_date = /** @type {string} */ (snapDueDateToWeekday(adjusted.due_date));
-      if (adjusted.start_date) {
-        adjusted.start_date = /** @type {string} */ (snapStartDateToWeekday(adjusted.start_date));
+    ({ updates }) => {
+      const adjustedUpdates = [];
+      for (const { task_id, task_name, fields } of updates) {
+        // Weekend dates snap per the agency calendar rule before the card renders.
+        const adjusted = { ...fields };
+        if (adjusted.due_date) adjusted.due_date = /** @type {string} */ (snapDueDateToWeekday(adjusted.due_date));
+        if (adjusted.start_date) {
+          adjusted.start_date = /** @type {string} */ (snapStartDateToWeekday(adjusted.start_date));
+        }
+        if (adjusted.stage) {
+          const resolvedStage = resolveStage(conventions, adjusted.stage);
+          if (!resolvedStage) {
+            return Promise.resolve(
+              asResult(
+                `Unknown stage "${adjusted.stage}" on task ${task_id}. Valid stages: ${Object.keys(conventions.clickup.project_stage_field?.options || {}).join(', ')}.`,
+              ),
+            );
+          }
+          // Store the canonical name; the executor resolves it to the option ID.
+          adjusted.stage = resolvedStage.name;
+        }
+        adjustedUpdates.push({ taskId: task_id, taskName: task_name, fields: adjusted });
       }
-      return postProposal('task_update', { taskId: task_id, fields: adjusted });
+      return postProposal('task_update', { updates: adjustedUpdates });
     },
   );
 
