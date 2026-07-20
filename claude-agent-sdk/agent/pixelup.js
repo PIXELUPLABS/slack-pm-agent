@@ -56,6 +56,9 @@ filtering by the requester's ClickUp ID from the conventions.
 Slack channels already exist): call propose_client_registration with the client name; code \
 locates the folder, lists, and channels and posts the config entry for approval. After \
 approval the client is usable immediately.
+7. **Automation ideas** — anyone mentions a process they'd like automated ("can you add this \
+to the automation ideas list"): call propose_automation_idea with a clear title and any detail \
+given. Open to the whole team, not just leads.
 
 ## TEAM CONVENTIONS
 - Every user message is prefixed with "[From <@SLACK_ID>]" — that is the requester. Resolve \
@@ -121,6 +124,7 @@ const EMOJI_DESCRIPTION =
 const LOCAL_TOOLS = [
   'add_emoji_reaction',
   'mark_resolved',
+  'propose_automation_idea',
   'propose_client_registration',
   'propose_client_update',
   'propose_project_scaffold',

@@ -62,6 +62,21 @@ describe('buildApprovalCard', () => {
     assert.ok(summary.includes('[Home / mobile] Button misaligned'));
   });
 
+  it('summarizes an automation idea', () => {
+    const blocks = buildApprovalCard({
+      id: 'p-3',
+      type: 'automation_idea',
+      payload: { title: 'Auto-draft standup summaries', description: 'Pull from Slack threads each morning.' },
+      requesterId: 'U1',
+      status: 'pending',
+      createdAt: Date.now(),
+    });
+    const summary = blocks[1].text.text;
+    assert.ok(summary.includes('Auto-draft standup summaries'));
+    assert.ok(summary.includes('Pull from Slack threads'));
+    assert.ok(summary.includes('Automation Ideas list'));
+  });
+
   it('mentions the requester in context', () => {
     const blocks = buildApprovalCard(taskProposal());
     const context = blocks.find((b) => b.type === 'context');

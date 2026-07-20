@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 /**
- * @typedef {'task' | 'task_update' | 'qa_tasks' | 'scaffold' | 'client_update' | 'client_registration'} ProposalType
+ * @typedef {'task' | 'task_update' | 'qa_tasks' | 'scaffold' | 'client_update' | 'client_registration' | 'automation_idea'} ProposalType
  */
 
 /**

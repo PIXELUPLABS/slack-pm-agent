@@ -277,6 +277,27 @@ export function createProposalTools(deps, conventions) {
     },
   );
 
+  const proposeAutomationIdea = tool(
+    'propose_automation_idea',
+    'Log a process-automation idea to the internal Automation Ideas list (Operations space). Open to anyone on ' +
+      'the team, not just leads — this is not client work.',
+    {
+      title: z.string().max(120).describe('Short, specific summary of the idea.'),
+      description: z.string().optional().describe('The idea in more detail: what process, what it would save.'),
+    },
+    ({ title, description }) => {
+      if (!conventions.internal_lists?.automation_ideas) {
+        return Promise.resolve(
+          asResult(
+            'The Automation Ideas list is not configured yet — add internal_lists.automation_ideas.list_id in ' +
+              'config/conventions.json and restart the bot.',
+          ),
+        );
+      }
+      return postProposal('automation_idea', { title, description });
+    },
+  );
+
   return [
     proposeTask,
     proposeTaskUpdate,
@@ -284,5 +305,6 @@ export function createProposalTools(deps, conventions) {
     proposeScaffold,
     proposeClientUpdate,
     proposeClientRegistration,
+    proposeAutomationIdea,
   ];
 }

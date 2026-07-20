@@ -11,6 +11,7 @@ const HEADINGS = {
   scaffold: ':building_construction: Project scaffold',
   client_update: ':newspaper: Client update draft',
   client_registration: ':card_index: Register client',
+  automation_idea: ':bulb: Automation idea',
 };
 
 /**
@@ -79,6 +80,12 @@ function summarizePayload(proposal) {
       ];
       if (p.notes?.length) lines.push(p.notes.map((/** @type {string} */ n) => `:warning: ${n}`).join('\n'));
       lines.push('_Approving writes this entry to conventions.json and reloads the config._');
+      return lines.join('\n');
+    }
+    case 'automation_idea': {
+      const lines = [`*Idea:* ${p.title}`];
+      if (p.description) lines.push(`*Details:* ${p.description}`);
+      lines.push('_Goes into the Automation Ideas list (Operations space)._');
       return lines.join('\n');
     }
     default:

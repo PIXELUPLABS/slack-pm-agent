@@ -66,6 +66,18 @@ describe('validateConventions', () => {
     assert.throws(() => validateConventions(data), /clients\.acme\.list_id/);
   });
 
+  it('accepts an internal_lists section', () => {
+    const data = validData();
+    data.internal_lists = { automation_ideas: { display_name: 'Automation Ideas', list_id: 'L9' } };
+    assert.deepStrictEqual(validateConventions(data), data);
+  });
+
+  it('rejects an internal_lists entry missing a field', () => {
+    const data = validData();
+    data.internal_lists = { automation_ideas: { display_name: 'Automation Ideas' } };
+    assert.throws(() => validateConventions(data), /internal_lists\.automation_ideas\.list_id/);
+  });
+
   it('rejects an invalid schedule day', () => {
     const data = validData();
     data.client_updates.days = ['tuesday', 'someday'];

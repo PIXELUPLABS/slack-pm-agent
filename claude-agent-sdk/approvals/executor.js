@@ -189,6 +189,17 @@ export async function executeProposal(proposal, conventions, clickup = clickupDe
         summary: 'Draft approved — ready for a human to copy and send. The bot never posts to client channels.',
       };
 
+    case 'automation_idea': {
+      const list = conventions.internal_lists?.automation_ideas;
+      if (!list) throw new Error('internal_lists.automation_ideas is not configured in conventions.json.');
+      const task = await clickup.createTask(list.list_id, {
+        name: p.title,
+        description: [p.description, `Submitted by <@${proposal.requesterId}> via Slack.`].filter(Boolean).join('\n\n'),
+        status: conventions.clickup.default_status,
+      });
+      return { summary: `Automation idea logged: ${task.url ? `<${task.url}|${task.name}>` : task.name}` };
+    }
+
     case 'client_registration': {
       // Writes to conventions.json (not ClickUp) and hot-reloads the config.
       addClientToConventions(p.clientKey, p.entry);

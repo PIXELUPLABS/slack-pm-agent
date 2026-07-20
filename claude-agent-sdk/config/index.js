@@ -18,12 +18,19 @@ import { readFileSync, writeFileSync } from 'node:fs';
  */
 
 /**
+ * @typedef {Object} InternalListConfig
+ * @property {string} display_name
+ * @property {string} list_id
+ */
+
+/**
  * @typedef {Object} Conventions
  * @property {{ name: string, voice: string }} agency
  * @property {{ task_name_format: string, priorities: Record<string, number>, default_priority: string, statuses: string[], default_status: string, qa_statuses?: string[], qa_default_status?: string, project_stage_field?: { id: string, options: Record<string, string> } }} clickup
  * @property {{ list_name: string, tasks: string[] }} [scaffold_template]
  * @property {Record<string, ClientConfig>} clients
  * @property {Record<string, UserConfig>} users
+ * @property {Record<string, InternalListConfig>} [internal_lists] - Non-client ClickUp lists (e.g. Automation Ideas in Operations) the agent may log to.
  * @property {{ drafts_channel_id: string }} channels
  * @property {{ enabled: boolean, days: string[], hour: number, minute: number, timezone: string }} client_updates
  */
@@ -86,6 +93,16 @@ export function validateConventions(data) {
     const validDays = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
     for (const day of data.client_updates.days || []) {
       if (!validDays.includes(day)) problems.push(`client_updates.days contains invalid day "${day}"`);
+    }
+  }
+
+  if (data.internal_lists) {
+    for (const [key, list] of Object.entries(data.internal_lists)) {
+      for (const field of ['display_name', 'list_id']) {
+        if (typeof (/** @type {any} */ (list)?.[field]) !== 'string') {
+          problems.push(`internal_lists.${key}.${field} must be a string`);
+        }
+      }
     }
   }
 
@@ -264,6 +281,12 @@ export function conventionsSummary(conventions) {
   if (conventions.clickup.project_stage_field) {
     lines.push(
       `Scaffold task stages (set stage per task; it drives the board grouping): ${Object.keys(conventions.clickup.project_stage_field.options).join(', ')}. Task priorities on scaffolds are set by code from due dates (closest urgent, second high, rest low) — do not set them yourself.`,
+    );
+  }
+  if (conventions.internal_lists?.automation_ideas) {
+    lines.push(
+      'Automation ideas: anyone on the team can float a process-automation idea — use propose_automation_idea ' +
+        'to log it in the internal Automation Ideas list. Not client work; no lead gate.',
     );
   }
   return lines.join('\n');

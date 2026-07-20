@@ -21,6 +21,9 @@ function conventions() {
       U0LEAD: { name: 'Lead', clickup_user_id: 11, role: 'lead' },
       U0MEMBER: { name: 'Member', clickup_user_id: 22, role: 'member' },
     },
+    internal_lists: {
+      automation_ideas: { display_name: 'Automation Ideas', list_id: 'AUTOLIST' },
+    },
     channels: { drafts_channel_id: 'C0DRAFTS' },
     client_updates: { enabled: false, days: ['tuesday'], hour: 9, minute: 0, timezone: 'UTC' },
   });
@@ -251,6 +254,28 @@ describe('executeProposal', () => {
     assert.ok(result.summary.includes('never posts to client channels'));
   });
 
+  it('automation_idea: creates a task in the configured internal list', async () => {
+    const p = proposal({
+      type: 'automation_idea',
+      payload: { title: 'Auto-draft standup summaries', description: 'Pull from Slack threads each morning.' },
+    });
+    const result = await executeProposal(p, conventions(), fakeClickUp);
+    assert.strictEqual(fakeClickUp.createTask.mock.callCount(), 1);
+    const [listId, fields] = fakeClickUp.createTask.mock.calls[0].arguments;
+    assert.strictEqual(listId, 'AUTOLIST');
+    assert.strictEqual(fields.name, 'Auto-draft standup summaries');
+    assert.ok(fields.description.includes('Pull from Slack threads'));
+    assert.ok(fields.description.includes('<@U0MEMBER>'));
+    assert.ok(result.summary.includes('Automation idea logged'));
+  });
+
+  it('automation_idea: rejects when the list is not configured', async () => {
+    const p = proposal({ type: 'automation_idea', payload: { title: 'x' } });
+    const conv = conventions();
+    delete conv.internal_lists;
+    await assert.rejects(() => executeProposal(p, conv, fakeClickUp), /internal_lists\.automation_ideas/);
+  });
+
   it('refuses unknown proposal types', async () => {
     const p = proposal({ type: /** @type {any} */ ('delete_everything'), payload: {} });
     await assert.rejects(() => executeProposal(p, conventions(), fakeClickUp), /Unknown proposal type/);
@@ -269,6 +294,10 @@ describe('canApprove', () => {
     assert.strictEqual(canApprove(proposal({ type: 'task', payload: {} }), 'U0LEAD', conv), true);
     assert.strictEqual(canApprove(proposal({ type: 'scaffold', payload: {} }), 'U0LEAD', conv), true);
     assert.strictEqual(canApprove(proposal({ type: 'client_update', payload: {} }), 'U0LEAD', conv), true);
+  });
+
+  it('requester (member) can approve their own automation idea, unlike scaffolds/client updates', () => {
+    assert.strictEqual(canApprove(proposal({ type: 'automation_idea', payload: {} }), 'U0MEMBER', conv), true);
   });
 
   it('members cannot approve scaffolds or client updates, even their own', () => {
