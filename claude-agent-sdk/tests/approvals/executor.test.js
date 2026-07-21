@@ -22,7 +22,7 @@ function conventions() {
       U0MEMBER: { name: 'Member', clickup_user_id: 22, role: 'member' },
     },
     internal_lists: {
-      automation_ideas: { display_name: 'Automation Ideas', list_id: 'AUTOLIST' },
+      automation_ideas: { display_name: 'Automation Ideas', list_id: 'AUTOLIST', default_status: 'backlog' },
     },
     channels: { drafts_channel_id: 'C0DRAFTS' },
     client_updates: { enabled: false, days: ['tuesday'], hour: 9, minute: 0, timezone: 'UTC' },
@@ -264,9 +264,18 @@ describe('executeProposal', () => {
     const [listId, fields] = fakeClickUp.createTask.mock.calls[0].arguments;
     assert.strictEqual(listId, 'AUTOLIST');
     assert.strictEqual(fields.name, 'Auto-draft standup summaries');
+    assert.strictEqual(fields.status, 'backlog');
     assert.ok(fields.description.includes('Pull from Slack threads'));
     assert.ok(fields.description.includes('<@U0MEMBER>'));
     assert.ok(result.summary.includes('Automation idea logged'));
+  });
+
+  it('automation_idea: omits status rather than falling back to a client-list status', async () => {
+    const p = proposal({ type: 'automation_idea', payload: { title: 'x' } });
+    const conv = conventions();
+    delete conv.internal_lists.automation_ideas.default_status;
+    await executeProposal(p, conv, fakeClickUp);
+    assert.strictEqual(fakeClickUp.createTask.mock.calls[0].arguments[1].status, undefined);
   });
 
   it('automation_idea: rejects when the list is not configured', async () => {

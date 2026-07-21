@@ -195,7 +195,9 @@ export async function executeProposal(proposal, conventions, clickup = clickupDe
       const task = await clickup.createTask(list.list_id, {
         name: p.title,
         description: [p.description, `Submitted by <@${proposal.requesterId}> via Slack.`].filter(Boolean).join('\n\n'),
-        status: conventions.clickup.default_status,
+        // This list has its own status pipeline (e.g. backlog → … → complete),
+        // unrelated to conventions.clickup.statuses used by client lists.
+        status: list.default_status,
       });
       return { summary: `Automation idea logged: ${task.url ? `<${task.url}|${task.name}>` : task.name}` };
     }

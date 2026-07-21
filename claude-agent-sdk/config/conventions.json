@@ -196,7 +196,8 @@
   "internal_lists": {
     "automation_ideas": {
       "display_name": "Automation Ideas",
-      "list_id": "901615834917"
+      "list_id": "901615834917",
+      "default_status": "backlog"
     }
   },
   "channels": {

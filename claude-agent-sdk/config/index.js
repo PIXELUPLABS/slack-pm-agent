@@ -21,6 +21,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
  * @typedef {Object} InternalListConfig
  * @property {string} display_name
  * @property {string} list_id
+ * @property {string} [default_status] - This list has its own status pipeline, separate from clickup.statuses.
  */
 
 /**
@@ -102,6 +103,10 @@ export function validateConventions(data) {
         if (typeof (/** @type {any} */ (list)?.[field]) !== 'string') {
           problems.push(`internal_lists.${key}.${field} must be a string`);
         }
+      }
+      const defaultStatus = /** @type {any} */ (list)?.default_status;
+      if (defaultStatus !== undefined && typeof defaultStatus !== 'string') {
+        problems.push(`internal_lists.${key}.default_status must be a string when present`);
       }
     }
   }
