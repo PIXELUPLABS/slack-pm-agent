@@ -104,8 +104,8 @@ export function createProposalTools(deps, conventions) {
 
   const proposeTaskUpdate = tool(
     'propose_task_update',
-    'Propose changes to one or more existing ClickUp tasks (name, description, priority, due_date, status, stage). ' +
-      'Batch ALL related changes into ONE call — the approver gets a single card and taps once.',
+    'Propose changes to one or more existing ClickUp tasks (name, description, priority, due_date, status, stage, ' +
+      'assignees). Batch ALL related changes into ONE call — the approver gets a single card and taps once.',
     {
       updates: z
         .array(
@@ -114,9 +114,17 @@ export function createProposalTools(deps, conventions) {
             task_name: z.string().optional().describe('Task name, shown on the approval card.'),
             fields: z
               .record(z.string(), z.string())
+              .optional()
               .describe(
                 'Field → new value. Allowed: name, description, priority, start_date, due_date (YYYY-MM-DD), status, ' +
-                  'stage (Project Stage board group: planning, visual design, content, dev, or qa).',
+                  'stage (Project Stage board group: planning, visual design, content, dev, or qa). ' +
+                  'Do NOT put assignees here — use assignee_slack_ids instead.',
+              ),
+            assignee_slack_ids: z
+              .array(z.string())
+              .optional()
+              .describe(
+                'Slack IDs from the team list to (re)assign the task to. Sets the task assignees to these users.',
               ),
           }),
         )
@@ -124,9 +132,9 @@ export function createProposalTools(deps, conventions) {
     },
     ({ updates }) => {
       const adjustedUpdates = [];
-      for (const { task_id, task_name, fields } of updates) {
+      for (const { task_id, task_name, fields, assignee_slack_ids } of updates) {
         // Weekend dates snap per the agency calendar rule before the card renders.
-        const adjusted = { ...fields };
+        const adjusted = { ...(fields || {}) };
         if (adjusted.due_date) adjusted.due_date = /** @type {string} */ (snapDueDateToWeekday(adjusted.due_date));
         if (adjusted.start_date) {
           adjusted.start_date = /** @type {string} */ (snapStartDateToWeekday(adjusted.start_date));
@@ -143,7 +151,14 @@ export function createProposalTools(deps, conventions) {
           // Store the canonical name; the executor resolves it to the option ID.
           adjusted.stage = resolvedStage.name;
         }
-        adjustedUpdates.push({ taskId: task_id, taskName: task_name, fields: adjusted });
+        adjustedUpdates.push({
+          taskId: task_id,
+          taskName: task_name,
+          fields: adjusted,
+          assigneeSlackIds: assignee_slack_ids,
+          // Names for the approval card; IDs resolve to ClickUp users in the executor.
+          assigneeNames: (assignee_slack_ids || []).map((id) => conventions.users[id]?.name).filter(Boolean),
+        });
       }
       return postProposal('task_update', { updates: adjustedUpdates });
     },

@@ -9,8 +9,13 @@ import { resolveStage } from './scaffold-rules.js';
  * ClickUp MCP module exposes no delete call.
  */
 
-/** Fields the executor will pass through on a task update. Anything else is dropped. */
-const UPDATABLE_FIELDS = ['name', 'description', 'priority', 'start_date', 'due_date', 'status', 'assignees', 'stage'];
+/**
+ * Fields the executor will pass through on a task update. Anything else is
+ * dropped. Assignees are deliberately NOT here — they arrive as Slack IDs on
+ * `update.assigneeSlackIds` and are resolved to ClickUp user IDs below, so the
+ * agent can never smuggle a raw numeric ID through the free-form field map.
+ */
+const UPDATABLE_FIELDS = ['name', 'description', 'priority', 'start_date', 'due_date', 'status', 'stage'];
 
 /**
  * @param {import('../config/index.js').Conventions} conventions
@@ -82,6 +87,20 @@ export async function executeProposal(proposal, conventions, clickup = clickupDe
             if (!stage || !stageFieldId) throw new Error(`Unknown stage "${value}" — check config/conventions.json.`);
             fields.custom_fields = [{ id: stageFieldId, value: stage.optionId }];
           } else fields[key] = value;
+        }
+        // Reassignment: resolve Slack IDs → ClickUp numeric IDs. The MCP update
+        // tool takes a flat `assignees` array (arg shape verified live) and
+        // sets the task's assignees to it.
+        if (Array.isArray(update.assigneeSlackIds) && update.assigneeSlackIds.length > 0) {
+          const ids = update.assigneeSlackIds
+            .map((/** @type {string} */ slackId) => getClickUpUserId(conventions, slackId))
+            .filter((/** @type {number | null} */ id) => id !== null);
+          if (ids.length === 0) {
+            throw new Error(
+              `None of the requested assignees for task ${update.taskId} are in the team mapping — check config/conventions.json.`,
+            );
+          }
+          fields.assignees = /** @type {number[]} */ (ids);
         }
         if (Object.keys(fields).length === 0) {
           throw new Error(`No updatable fields for task ${update.taskId} in this proposal.`);

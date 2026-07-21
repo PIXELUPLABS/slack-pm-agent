@@ -161,6 +161,36 @@ describe('executeProposal', () => {
     await assert.rejects(() => executeProposal(p, conventions(), fakeClickUp), /No updatable fields/);
   });
 
+  it('task_update: reassigns by resolving Slack IDs to ClickUp user IDs', async () => {
+    const p = proposal({
+      type: 'task_update',
+      payload: { updates: [{ taskId: 't9', fields: { status: 'done' }, assigneeSlackIds: ['U0MEMBER'] }] },
+    });
+    await executeProposal(p, conventions(), fakeClickUp);
+    const [taskId, fields] = fakeClickUp.updateTask.mock.calls[0].arguments;
+    assert.strictEqual(taskId, 't9');
+    assert.deepStrictEqual(fields, { status: 'done', assignees: [22] });
+  });
+
+  it('task_update: assignee-only update executes without other fields', async () => {
+    const p = proposal({
+      type: 'task_update',
+      payload: { updates: [{ taskId: 't9', assigneeSlackIds: ['U0MEMBER', 'U0LEAD'] }] },
+    });
+    await executeProposal(p, conventions(), fakeClickUp);
+    const [taskId, fields] = fakeClickUp.updateTask.mock.calls[0].arguments;
+    assert.strictEqual(taskId, 't9');
+    assert.deepStrictEqual(fields, { assignees: [22, 11] });
+  });
+
+  it('task_update: rejects when no requested assignee is in the mapping', async () => {
+    const p = proposal({
+      type: 'task_update',
+      payload: { updates: [{ taskId: 't9', assigneeSlackIds: ['U0GHOST'] }] },
+    });
+    await assert.rejects(() => executeProposal(p, conventions(), fakeClickUp), /None of the requested assignees/);
+  });
+
   it('task_update: translates stage into the Project Stage custom field', async () => {
     const p = proposal({ type: 'task_update', payload: { updates: [{ taskId: 't9', fields: { stage: 'dev' } }] } });
     const conv = conventions();

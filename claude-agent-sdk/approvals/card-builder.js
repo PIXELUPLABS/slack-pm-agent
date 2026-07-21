@@ -34,10 +34,9 @@ function summarizePayload(proposal) {
       // Batch payload ({ updates: [...] }); single-task legacy shape normalizes to a one-entry batch.
       const updates = p.updates || [{ taskId: p.taskId, fields: p.fields }];
       const perTask = updates.map((/** @type {any} */ u) => {
-        const changes = Object.entries(u.fields || {})
-          .map(([key, value]) => `${key} → ${value}`)
-          .join(', ');
-        return `• ${u.taskName ? `${u.taskName} (\`${u.taskId}\`)` : `\`${u.taskId}\``}: ${changes}`;
+        const changes = Object.entries(u.fields || {}).map(([key, value]) => `${key} → ${value}`);
+        if (u.assigneeNames?.length) changes.push(`assignee → ${u.assigneeNames.join(', ')}`);
+        return `• ${u.taskName ? `${u.taskName} (\`${u.taskId}\`)` : `\`${u.taskId}\``}: ${changes.join(', ')}`;
       });
       const heading = updates.length === 1 ? '*Changes:*' : `*Changes to ${updates.length} tasks:*`;
       return `${heading}\n${perTask.join('\n')}`;
