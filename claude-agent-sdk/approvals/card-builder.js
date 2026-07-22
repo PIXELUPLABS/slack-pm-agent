@@ -7,6 +7,7 @@
 const HEADINGS = {
   task: ':memo: New ClickUp task',
   task_update: ':pencil2: ClickUp task update',
+  task_move: ':truck: Move task',
   qa_tasks: ':mag: QA tasks',
   scaffold: ':building_construction: Project scaffold',
   client_update: ':newspaper: Client update draft',
@@ -25,7 +26,10 @@ function summarizePayload(proposal) {
       const lines = [`*Title:* ${p.title}`, `*Client:* ${p.clientKey}`, `*Priority:* ${p.priority || 'default'}`];
       if (p.stageName) lines.push(`*Stage:* ${p.stageName}`);
       if (p.dueDate) lines.push(`*Due:* ${p.dueDate}`);
-      if (p.assigneeName) lines.push(`*Assignee:* ${p.assigneeName}`);
+      if (p.assigneeNames?.length) lines.push(`*Assignee:* ${p.assigneeNames.join(', ')}`);
+      if (p.parentTaskId) lines.push(`*Subtask of:* \`${p.parentTaskId}\``);
+      if (p.tags?.length) lines.push(`*Tags:* ${p.tags.join(', ')}`);
+      if (p.timeEstimateMinutes) lines.push(`*Estimate:* ${p.timeEstimateMinutes} min`);
       if (p.description) lines.push(`*Details:* ${p.description}`);
       if (p.sourceQuote) lines.push(`*Source message:*\n> ${String(p.sourceQuote).split('\n').join('\n> ')}`);
       return lines.join('\n');
@@ -35,11 +39,17 @@ function summarizePayload(proposal) {
       const updates = p.updates || [{ taskId: p.taskId, fields: p.fields }];
       const perTask = updates.map((/** @type {any} */ u) => {
         const changes = Object.entries(u.fields || {}).map(([key, value]) => `${key} → ${value}`);
-        if (u.assigneeNames?.length) changes.push(`assignee → ${u.assigneeNames.join(', ')}`);
+        if (u.unassign) changes.push('assignee → (cleared)');
+        else if (u.assigneeNames?.length) changes.push(`assignee → ${u.assigneeNames.join(', ')}`);
         return `• ${u.taskName ? `${u.taskName} (\`${u.taskId}\`)` : `\`${u.taskId}\``}: ${changes.join(', ')}`;
       });
       const heading = updates.length === 1 ? '*Changes:*' : `*Changes to ${updates.length} tasks:*`;
       return `${heading}\n${perTask.join('\n')}`;
+    }
+    case 'task_move': {
+      const dest = `${p.destClientKey}${p.toQa ? ' — QA list' : ''}`;
+      const label = p.taskName ? `${p.taskName} (\`${p.taskId}\`)` : `\`${p.taskId}\``;
+      return `Move ${label} → *${dest}*`;
     }
     case 'qa_tasks': {
       const items = (p.tasks || [])

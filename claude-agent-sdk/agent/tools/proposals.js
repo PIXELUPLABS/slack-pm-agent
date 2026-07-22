@@ -10,7 +10,7 @@ import {
   snapStartDateToWeekday,
 } from '../../approvals/scaffold-rules.js';
 import { proposalStore } from '../../approvals/store.js';
-import { isClientChannel, isLead } from '../../config/index.js';
+import { isClientChannel, isKnownPriority, isLead, knownStatuses, resolveStatus } from '../../config/index.js';
 import * as clickupMcp from '../../integrations/clickup-mcp.js';
 
 /** @param {string} text @returns {{ content: [{ type: 'text', text: string }] }} */
@@ -66,7 +66,10 @@ export function createProposalTools(deps, conventions) {
       .string()
       .optional()
       .describe('Project Stage board group: planning, visual design, content, dev, or qa. Infer from the task type.'),
-    assignee_slack_id: z.string().optional(),
+    assignee_slack_ids: z.array(z.string()).optional().describe('Slack IDs to assign, from the team list.'),
+    parent_task_id: z.string().optional().describe('Parent task ID — creates this task as a subtask under it.'),
+    tags: z.array(z.string()).optional().describe('Tag names that already exist in the ClickUp space.'),
+    time_estimate_minutes: z.number().int().positive().optional().describe('Time estimate in minutes.'),
     source_quote: z.string().optional().describe('Verbatim client message this task is based on.'),
   };
 
@@ -74,13 +77,30 @@ export function createProposalTools(deps, conventions) {
     'propose_task',
     'Propose one ClickUp task for approval. Set stage so the task lands in the right board group. Always include source_quote when the task comes from a client message.',
     taskSchema,
-    ({ client_key, title, description, priority, due_date, stage, assignee_slack_id, source_quote }) => {
+    ({
+      client_key,
+      title,
+      description,
+      priority,
+      due_date,
+      stage,
+      assignee_slack_ids,
+      parent_task_id,
+      tags,
+      time_estimate_minutes,
+      source_quote,
+    }) => {
       const resolvedStage = resolveStage(conventions, stage);
       if (stage && !resolvedStage) {
         return Promise.resolve(
           asResult(
             `Unknown stage "${stage}". Valid stages: ${Object.keys(conventions.clickup.project_stage_field?.options || {}).join(', ')}.`,
           ),
+        );
+      }
+      if (!isKnownPriority(conventions, priority)) {
+        return Promise.resolve(
+          asResult(`Unknown priority "${priority}". Valid: ${Object.keys(conventions.clickup.priorities).join(', ')}.`),
         );
       }
       return postProposal(
@@ -93,8 +113,11 @@ export function createProposalTools(deps, conventions) {
           dueDate: snapDueDateToWeekday(due_date),
           stageName: resolvedStage?.name,
           stageOptionId: resolvedStage?.optionId,
-          assigneeSlackId: assignee_slack_id,
-          assigneeName: assignee_slack_id ? conventions.users[assignee_slack_id]?.name : undefined,
+          assigneeSlackIds: assignee_slack_ids,
+          assigneeNames: (assignee_slack_ids || []).map((id) => conventions.users[id]?.name).filter(Boolean),
+          parentTaskId: parent_task_id,
+          tags,
+          timeEstimateMinutes: time_estimate_minutes,
           sourceQuote: source_quote,
         },
         client_key,
@@ -126,13 +149,17 @@ export function createProposalTools(deps, conventions) {
               .describe(
                 'Slack IDs from the team list to (re)assign the task to. Sets the task assignees to these users.',
               ),
+            unassign: z
+              .boolean()
+              .optional()
+              .describe('Remove ALL assignees from the task. Ignores assignee_slack_ids when true.'),
           }),
         )
         .min(1),
     },
     ({ updates }) => {
       const adjustedUpdates = [];
-      for (const { task_id, task_name, fields, assignee_slack_ids } of updates) {
+      for (const { task_id, task_name, fields, assignee_slack_ids, unassign } of updates) {
         // Weekend dates snap per the agency calendar rule before the card renders.
         const adjusted = { ...(fields || {}) };
         if (adjusted.due_date) adjusted.due_date = /** @type {string} */ (snapDueDateToWeekday(adjusted.due_date));
@@ -151,10 +178,30 @@ export function createProposalTools(deps, conventions) {
           // Store the canonical name; the executor resolves it to the option ID.
           adjusted.stage = resolvedStage.name;
         }
+        if (!isKnownPriority(conventions, adjusted.priority)) {
+          return Promise.resolve(
+            asResult(
+              `Unknown priority "${adjusted.priority}" on task ${task_id}. Valid: ${Object.keys(conventions.clickup.priorities).join(', ')}.`,
+            ),
+          );
+        }
+        if (adjusted.status) {
+          const canonical = resolveStatus(conventions, adjusted.status);
+          if (!canonical) {
+            return Promise.resolve(
+              asResult(
+                `Unknown status "${adjusted.status}" on task ${task_id}. Valid: ${knownStatuses(conventions).join(', ')}.`,
+              ),
+            );
+          }
+          // Store canonical casing; the executor validates again as a safety net.
+          adjusted.status = canonical;
+        }
         adjustedUpdates.push({
           taskId: task_id,
           taskName: task_name,
           fields: adjusted,
+          unassign,
           assigneeSlackIds: assignee_slack_ids,
           // Names for the approval card; IDs resolve to ClickUp users in the executor.
           assigneeNames: (assignee_slack_ids || []).map((id) => conventions.users[id]?.name).filter(Boolean),
@@ -313,9 +360,28 @@ export function createProposalTools(deps, conventions) {
     },
   );
 
+  const proposeTaskMove = tool(
+    'propose_task_move',
+    "Propose moving an existing task into a different client's list. Moves into the client's engagement list by " +
+      'default; set to_qa_list to move it into their QA list instead.',
+    {
+      task_id: z.string(),
+      task_name: z.string().optional().describe('Task name, shown on the approval card.'),
+      destination_client_key: z.string().describe('Client whose list the task should move into.'),
+      to_qa_list: z.boolean().optional().describe("Move into the client's QA list instead of the engagement list."),
+    },
+    ({ task_id, task_name, destination_client_key, to_qa_list }) =>
+      postProposal(
+        'task_move',
+        { taskId: task_id, taskName: task_name, destClientKey: destination_client_key, toQa: Boolean(to_qa_list) },
+        destination_client_key,
+      ),
+  );
+
   return [
     proposeTask,
     proposeTaskUpdate,
+    proposeTaskMove,
     proposeQaTasks,
     proposeScaffold,
     proposeClientUpdate,

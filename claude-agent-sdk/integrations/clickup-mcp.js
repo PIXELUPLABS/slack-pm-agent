@@ -20,6 +20,7 @@ import { CLICKUP_MCP, serverToken, serverUrl } from './mcp-servers.js';
 const WRITE_TOOLS = {
   createTask: 'clickup_create_task',
   updateTask: 'clickup_update_task',
+  moveTask: 'clickup_move_task',
   createListInFolder: 'clickup_create_list_in_folder',
   addTaskDependency: 'clickup_add_task_dependency',
 };
@@ -43,10 +44,18 @@ export function toMcpTaskArgs(fields) {
   if (fields.due_date !== undefined) args.due_date = new Date(fields.due_date).toISOString().slice(0, 10);
   if (fields.start_date !== undefined) args.start_date = new Date(fields.start_date).toISOString().slice(0, 10);
   // The MCP tool validates assignees as an array of STRINGS (verified live).
-  if (Array.isArray(fields.assignees) && fields.assignees.length > 0) {
+  // An explicit clear sends an empty list (removes everyone); otherwise a
+  // non-empty list replaces the set. A bare empty array is a no-op.
+  if (fields.clear_assignees) {
+    args.assignees = [];
+  } else if (Array.isArray(fields.assignees) && fields.assignees.length > 0) {
     args.assignees = fields.assignees.map(String);
   }
   if (fields.status) args.status = fields.status;
+  if (fields.parent) args.parent = fields.parent;
+  if (Array.isArray(fields.tags) && fields.tags.length > 0) args.tags = fields.tags;
+  // The MCP tool takes time_estimate as a string count of minutes (verified live).
+  if (fields.time_estimate !== undefined) args.time_estimate = String(fields.time_estimate);
   if (Array.isArray(fields.custom_fields) && fields.custom_fields.length > 0) {
     args.custom_fields = fields.custom_fields;
   }
@@ -146,7 +155,11 @@ export function extractTaskRef(text) {
  * @property {number} [due_date] - Unix ms timestamp.
  * @property {number} [start_date] - Unix ms timestamp.
  * @property {number[]} [assignees] - ClickUp user IDs.
+ * @property {boolean} [clear_assignees] - Remove all assignees (sends an empty list).
  * @property {string} [status]
+ * @property {string} [parent] - Parent task ID; creates this task as a subtask.
+ * @property {string[]} [tags] - Tag names (must already exist in the space).
+ * @property {number} [time_estimate] - Time estimate in minutes.
  * @property {Array<{ id: string, value: any }>} [custom_fields]
  */
 
@@ -172,6 +185,16 @@ export async function updateTask(taskId, fields) {
   const text = await callTool(WRITE_TOOLS.updateTask, { task_id: taskId, ...toMcpTaskArgs(fields) });
   const ref = extractTaskRef(text);
   return { id: taskId, name: fields.name || taskId, url: ref.url };
+}
+
+/**
+ * Move a task to a different home list.
+ * @param {string} taskId
+ * @param {string} listId - Destination list ID.
+ * @returns {Promise<void>}
+ */
+export async function moveTask(taskId, listId) {
+  await callTool(WRITE_TOOLS.moveTask, { task_id: taskId, list_id: listId });
 }
 
 /**

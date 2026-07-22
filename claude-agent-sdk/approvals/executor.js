@@ -1,4 +1,12 @@
-import { addClientToConventions, formatTaskName, getClickUpUserId, resolvePriority } from '../config/index.js';
+import {
+  addClientToConventions,
+  formatTaskName,
+  getClickUpUserId,
+  isKnownPriority,
+  knownStatuses,
+  resolvePriority,
+  resolveStatus,
+} from '../config/index.js';
 import * as clickupDefault from '../integrations/clickup-mcp.js';
 import { resolveStage } from './scaffold-rules.js';
 
@@ -52,7 +60,17 @@ export async function executeProposal(proposal, conventions, clickup = clickupDe
   switch (proposal.type) {
     case 'task': {
       const client = requireClient(conventions, p.clientKey);
-      const assignee = p.assigneeSlackId ? getClickUpUserId(conventions, p.assigneeSlackId) : null;
+      if (!isKnownPriority(conventions, p.priority)) {
+        throw new Error(
+          `Unknown priority "${p.priority}" — valid: ${Object.keys(conventions.clickup.priorities).join(', ')}.`,
+        );
+      }
+      // Accept a list of assignees; tolerate the legacy singular field on any
+      // older stored proposals.
+      const assigneeSlackIds = p.assigneeSlackIds || (p.assigneeSlackId ? [p.assigneeSlackId] : []);
+      const assignees = assigneeSlackIds
+        .map((/** @type {string} */ slackId) => getClickUpUserId(conventions, slackId))
+        .filter((/** @type {number | null} */ id) => id !== null);
       const stageFieldId = conventions.clickup.project_stage_field?.id;
       const task = await clickup.createTask(client.list_id, {
         name: formatTaskName(conventions, p.clientKey, p.title),
@@ -61,12 +79,31 @@ export async function executeProposal(proposal, conventions, clickup = clickupDe
           .join('\n\n'),
         priority: resolvePriority(conventions, p.priority),
         due_date: parseDueDate(p.dueDate),
-        assignees: assignee ? [assignee] : undefined,
+        assignees: assignees.length > 0 ? /** @type {number[]} */ (assignees) : undefined,
         status: conventions.clickup.default_status,
+        parent: p.parentTaskId || undefined,
+        tags: Array.isArray(p.tags) && p.tags.length > 0 ? p.tags : undefined,
+        time_estimate: p.timeEstimateMinutes,
         // Project Stage drives the board grouping in the template lists.
         custom_fields: stageFieldId && p.stageOptionId ? [{ id: stageFieldId, value: p.stageOptionId }] : undefined,
       });
       return { summary: `Task created: ${task.url ? `<${task.url}|${task.name}>` : task.name}` };
+    }
+
+    case 'task_move': {
+      const client = requireClient(conventions, p.destClientKey);
+      const toQa = Boolean(p.toQa);
+      const listId = toQa ? client.qa_list_id : client.list_id;
+      if (!listId) {
+        throw new Error(
+          toQa
+            ? `${p.destClientKey} has no QA list mapped — set qa_list_id in config/conventions.json.`
+            : `${p.destClientKey} has no engagement list mapped — check config/conventions.json.`,
+        );
+      }
+      await clickup.moveTask(p.taskId, listId);
+      const label = p.taskName || p.taskId;
+      return { summary: `Task moved: \`${label}\` → *${client.display_name}*'s ${toQa ? 'QA' : 'engagement'} list.` };
     }
 
     case 'task_update': {
@@ -78,20 +115,38 @@ export async function executeProposal(proposal, conventions, clickup = clickupDe
         const fields = {};
         for (const [key, value] of Object.entries(update.fields || {})) {
           if (!UPDATABLE_FIELDS.includes(key)) continue;
-          if (key === 'priority') fields.priority = resolvePriority(conventions, String(value));
-          else if (key === 'due_date' || key === 'start_date') fields[key] = parseDueDate(String(value));
+          if (key === 'priority') {
+            if (!isKnownPriority(conventions, String(value))) {
+              throw new Error(
+                `Unknown priority "${value}" for task ${update.taskId} — valid: ${Object.keys(conventions.clickup.priorities).join(', ')}.`,
+              );
+            }
+            fields.priority = resolvePriority(conventions, String(value));
+          } else if (key === 'due_date' || key === 'start_date') fields[key] = parseDueDate(String(value));
           else if (key === 'stage') {
             // Stage is the Project Stage dropdown custom field, not a native field.
             const stage = resolveStage(conventions, String(value));
             const stageFieldId = conventions.clickup.project_stage_field?.id;
             if (!stage || !stageFieldId) throw new Error(`Unknown stage "${value}" — check config/conventions.json.`);
             fields.custom_fields = [{ id: stageFieldId, value: stage.optionId }];
+          } else if (key === 'status') {
+            // Reject unknown statuses here so a bad value fails before the card,
+            // not as an opaque ClickUp error after someone approves it.
+            const status = resolveStatus(conventions, String(value));
+            if (!status) {
+              throw new Error(
+                `Unknown status "${value}" for task ${update.taskId} — valid: ${knownStatuses(conventions).join(', ')}.`,
+              );
+            }
+            fields.status = status;
           } else fields[key] = value;
         }
-        // Reassignment: resolve Slack IDs → ClickUp numeric IDs. The MCP update
-        // tool takes a flat `assignees` array (arg shape verified live) and
-        // sets the task's assignees to it.
-        if (Array.isArray(update.assigneeSlackIds) && update.assigneeSlackIds.length > 0) {
+        // Reassignment: `unassign` clears everyone; otherwise resolve Slack IDs
+        // → ClickUp numeric IDs. The MCP update tool takes a flat `assignees`
+        // array (arg shape verified live) and sets the task's assignees to it.
+        if (update.unassign) {
+          fields.clear_assignees = true;
+        } else if (Array.isArray(update.assigneeSlackIds) && update.assigneeSlackIds.length > 0) {
           const ids = update.assigneeSlackIds
             .map((/** @type {string} */ slackId) => getClickUpUserId(conventions, slackId))
             .filter((/** @type {number | null} */ id) => id !== null);

@@ -41,4 +41,23 @@ describe('toMcpTaskArgs', () => {
     assert.strictEqual(toMcpTaskArgs({ assignees: /** @type {any} */ ('22') }).assignees, undefined);
     assert.strictEqual(toMcpTaskArgs({ assignees: [] }).assignees, undefined);
   });
+
+  it('clears assignees when clear_assignees is set', () => {
+    assert.deepStrictEqual(toMcpTaskArgs({ clear_assignees: true }).assignees, []);
+  });
+
+  it('clear_assignees overrides any assignees list', () => {
+    assert.deepStrictEqual(toMcpTaskArgs({ clear_assignees: true, assignees: [22] }).assignees, []);
+  });
+
+  it('maps parent, tags, and time_estimate (minutes as a string)', () => {
+    const args = toMcpTaskArgs({ parent: 'p1', tags: ['a', 'b'], time_estimate: 150 });
+    assert.strictEqual(args.parent, 'p1');
+    assert.deepStrictEqual(args.tags, ['a', 'b']);
+    assert.strictEqual(args.time_estimate, '150');
+  });
+
+  it('omits empty tags', () => {
+    assert.strictEqual(toMcpTaskArgs({ tags: [] }).tags, undefined);
+  });
 });

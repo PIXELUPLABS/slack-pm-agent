@@ -242,6 +242,41 @@ export function resolvePriority(conventions, priorityName) {
 }
 
 /**
+ * True when a priority name is defined in conventions. An empty/undefined name
+ * is valid — callers fall back to default_priority for the omitted case.
+ * @param {Conventions} conventions
+ * @param {string | undefined} priorityName
+ * @returns {boolean}
+ */
+export function isKnownPriority(conventions, priorityName) {
+  if (!priorityName) return true;
+  return priorityName in conventions.clickup.priorities;
+}
+
+/**
+ * All known status names (project + QA pipelines). A task update may target a
+ * client list or a QA list, so both sets are valid.
+ * @param {Conventions} conventions
+ * @returns {string[]}
+ */
+export function knownStatuses(conventions) {
+  return [...conventions.clickup.statuses, ...(conventions.clickup.qa_statuses || [])];
+}
+
+/**
+ * Resolve a status name to its canonical config casing (case-insensitive),
+ * across both pipelines. Returns null when the status is unknown — so callers
+ * can reject it before the card instead of failing the write after approval.
+ * @param {Conventions} conventions
+ * @param {string | undefined} statusName
+ * @returns {string | null}
+ */
+export function resolveStatus(conventions, statusName) {
+  if (!statusName) return null;
+  return knownStatuses(conventions).find((s) => s.toLowerCase() === statusName.toLowerCase()) ?? null;
+}
+
+/**
  * Format a task name per the naming convention.
  * @param {Conventions} conventions
  * @param {string} clientKey

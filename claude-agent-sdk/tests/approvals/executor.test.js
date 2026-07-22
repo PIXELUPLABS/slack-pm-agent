@@ -51,6 +51,7 @@ describe('executeProposal', () => {
         return { id: `t${taskCounter}`, name: fields.name, url: `https://cu/t${taskCounter}` };
       }),
       updateTask: mock.fn(async (taskId, _fields) => ({ id: taskId, name: 'Task', url: `https://cu/${taskId}` })),
+      moveTask: mock.fn(async () => {}),
       createList: mock.fn(async (_folderId, name) => ({ id: 'newlist', name })),
       addTaskDependency: mock.fn(async () => {}),
     };
@@ -83,6 +84,53 @@ describe('executeProposal', () => {
 
   it('task: rejects unknown clients', async () => {
     const p = proposal({ type: 'task', payload: { clientKey: 'ghost', title: 'x' } });
+    await assert.rejects(() => executeProposal(p, conventions(), fakeClickUp), /Unknown client "ghost"/);
+  });
+
+  it('task: creates with multiple assignees, a parent, tags, and an estimate', async () => {
+    const p = proposal({
+      type: 'task',
+      payload: {
+        clientKey: 'acme',
+        title: 'Sub work',
+        assigneeSlackIds: ['U0MEMBER', 'U0LEAD'],
+        parentTaskId: 'parent99',
+        tags: ['design', 'urgent'],
+        timeEstimateMinutes: 150,
+      },
+    });
+    await executeProposal(p, conventions(), fakeClickUp);
+    const [listId, fields] = fakeClickUp.createTask.mock.calls[0].arguments;
+    assert.strictEqual(listId, 'L1');
+    assert.deepStrictEqual(fields.assignees, [22, 11]);
+    assert.strictEqual(fields.parent, 'parent99');
+    assert.deepStrictEqual(fields.tags, ['design', 'urgent']);
+    assert.strictEqual(fields.time_estimate, 150);
+  });
+
+  it('task_move: moves into the client engagement list', async () => {
+    const p = proposal({ type: 'task_move', payload: { taskId: 't9', taskName: 'Header', destClientKey: 'acme' } });
+    const result = await executeProposal(p, conventions(), fakeClickUp);
+    assert.deepStrictEqual(fakeClickUp.moveTask.mock.calls[0].arguments, ['t9', 'L1']);
+    assert.ok(result.summary.includes('engagement'));
+  });
+
+  it('task_move: moves into the client QA list when to_qa_list is set', async () => {
+    const p = proposal({ type: 'task_move', payload: { taskId: 't9', destClientKey: 'acme', toQa: true } });
+    const result = await executeProposal(p, conventions(), fakeClickUp);
+    assert.deepStrictEqual(fakeClickUp.moveTask.mock.calls[0].arguments, ['t9', 'L2']);
+    assert.ok(result.summary.includes('QA'));
+  });
+
+  it('task_move: rejects a QA move when the client has no QA list', async () => {
+    const conv = conventions();
+    conv.clients.acme.qa_list_id = undefined;
+    const p = proposal({ type: 'task_move', payload: { taskId: 't9', destClientKey: 'acme', toQa: true } });
+    await assert.rejects(() => executeProposal(p, conv, fakeClickUp), /no QA list mapped/);
+  });
+
+  it('task_move: rejects an unknown destination client', async () => {
+    const p = proposal({ type: 'task_move', payload: { taskId: 't9', destClientKey: 'ghost' } });
     await assert.rejects(() => executeProposal(p, conventions(), fakeClickUp), /Unknown client "ghost"/);
   });
 
@@ -189,6 +237,50 @@ describe('executeProposal', () => {
       payload: { updates: [{ taskId: 't9', assigneeSlackIds: ['U0GHOST'] }] },
     });
     await assert.rejects(() => executeProposal(p, conventions(), fakeClickUp), /None of the requested assignees/);
+  });
+
+  it('task_update: unassign clears all assignees', async () => {
+    const p = proposal({ type: 'task_update', payload: { updates: [{ taskId: 't9', unassign: true }] } });
+    await executeProposal(p, conventions(), fakeClickUp);
+    const [taskId, fields] = fakeClickUp.updateTask.mock.calls[0].arguments;
+    assert.strictEqual(taskId, 't9');
+    assert.deepStrictEqual(fields, { clear_assignees: true });
+  });
+
+  it('task_update: unassign takes precedence over assignee_slack_ids', async () => {
+    const p = proposal({
+      type: 'task_update',
+      payload: { updates: [{ taskId: 't9', unassign: true, assigneeSlackIds: ['U0MEMBER'] }] },
+    });
+    await executeProposal(p, conventions(), fakeClickUp);
+    assert.deepStrictEqual(fakeClickUp.updateTask.mock.calls[0].arguments[1], { clear_assignees: true });
+  });
+
+  it('task_update: normalizes status casing to the config canonical', async () => {
+    const p = proposal({ type: 'task_update', payload: { updates: [{ taskId: 't9', fields: { status: 'DONE' } }] } });
+    await executeProposal(p, conventions(), fakeClickUp);
+    assert.deepStrictEqual(fakeClickUp.updateTask.mock.calls[0].arguments[1], { status: 'done' });
+  });
+
+  it('task_update: rejects an unknown status before writing', async () => {
+    const p = proposal({
+      type: 'task_update',
+      payload: { updates: [{ taskId: 't9', fields: { status: 'shipping' } }] },
+    });
+    await assert.rejects(() => executeProposal(p, conventions(), fakeClickUp), /Unknown status "shipping"/);
+  });
+
+  it('task_update: rejects an unknown priority before writing', async () => {
+    const p = proposal({
+      type: 'task_update',
+      payload: { updates: [{ taskId: 't9', fields: { priority: 'ultra' } }] },
+    });
+    await assert.rejects(() => executeProposal(p, conventions(), fakeClickUp), /Unknown priority "ultra"/);
+  });
+
+  it('task: rejects an unknown priority before writing', async () => {
+    const p = proposal({ type: 'task', payload: { clientKey: 'acme', title: 'x', priority: 'ultra' } });
+    await assert.rejects(() => executeProposal(p, conventions(), fakeClickUp), /Unknown priority "ultra"/);
   });
 
   it('task_update: translates stage into the Project Stage custom field', async () => {

@@ -35,7 +35,9 @@ them. To see stages across a list, get_task the specific tasks you care about.
 to find the message, then propose_task with title, priority, due date, stage, and the \
 verbatim quote. Always set stage (planning, visual design, content, dev, or qa) — it is the \
 board group the task lands in; infer it from the task type (design work → visual design, \
-implementation → dev, copy → content).
+implementation → dev, copy → content). Optional on propose_task: assignee_slack_ids (one or \
+more people), parent_task_id (makes it a subtask), tags (must already exist in the space), and \
+time_estimate_minutes.
 2. **Client onboarding** — user shares an engagement doc: read it (read_shared_file), \
 cross-check the Fireflies kickoff transcript for verbal agreements the doc misses, read the \
 client's existing engagement list (it is duplicated from the demo template and may already \
@@ -59,6 +61,9 @@ approval the client is usable immediately.
 7. **Automation ideas** — anyone mentions a process they'd like automated ("can you add this \
 to the automation ideas list"): call propose_automation_idea with a clear title and any detail \
 given. Open to the whole team, not just leads.
+8. **Move a task** — "move this task to the QA list" / "move it into {client}": call \
+propose_task_move with the task_id and destination_client_key (set to_qa_list to target the \
+client's QA list instead of their engagement list).
 
 ## TEAM CONVENTIONS
 - Every user message is prefixed with "[From <@SLACK_ID>]" — that is the requester. Resolve \
@@ -130,6 +135,7 @@ const LOCAL_TOOLS = [
   'propose_project_scaffold',
   'propose_qa_tasks',
   'propose_task',
+  'propose_task_move',
   'propose_task_update',
   'read_channel_messages',
   'read_shared_file',
