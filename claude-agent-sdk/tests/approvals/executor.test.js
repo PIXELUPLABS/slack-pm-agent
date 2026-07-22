@@ -40,6 +40,24 @@ function proposal(overrides) {
   });
 }
 
+/** @param {{ existingCanvasId?: string | null }} [opts] Minimal Slack Web API fake for canvas tests. */
+function fakeSlack({ existingCanvasId = null } = {}) {
+  return {
+    conversations: {
+      info: mock.fn(async () => ({
+        ok: true,
+        channel: existingCanvasId ? { properties: { canvas: { file_id: existingCanvasId } } } : { properties: {} },
+      })),
+      canvases: {
+        create: mock.fn(async () => ({ ok: true, canvas_id: 'NEWCANVAS' })),
+      },
+    },
+    canvases: {
+      edit: mock.fn(async () => ({ ok: true })),
+    },
+  };
+}
+
 describe('executeProposal', () => {
   let fakeClickUp;
 
@@ -132,6 +150,58 @@ describe('executeProposal', () => {
   it('task_move: rejects an unknown destination client', async () => {
     const p = proposal({ type: 'task_move', payload: { taskId: 't9', destClientKey: 'ghost' } });
     await assert.rejects(() => executeProposal(p, conventions(), fakeClickUp), /Unknown client "ghost"/);
+  });
+
+  it('canvas_update: creates a canvas when the channel has none', async () => {
+    const slack = fakeSlack({ existingCanvasId: null });
+    const p = proposal({
+      type: 'canvas_update',
+      payload: { channelId: 'C0INT', markdown: '# Status', mode: 'replace', title: 'Status' },
+    });
+    const result = await executeProposal(p, conventions(), fakeClickUp, slack);
+    assert.strictEqual(slack.conversations.canvases.create.mock.callCount(), 1);
+    const arg = slack.conversations.canvases.create.mock.calls[0].arguments[0];
+    assert.strictEqual(arg.channel_id, 'C0INT');
+    assert.deepStrictEqual(arg.document_content, { type: 'markdown', markdown: '# Status' });
+    assert.strictEqual(arg.title, 'Status');
+    assert.strictEqual(slack.canvases.edit.mock.callCount(), 0);
+    assert.ok(result.summary.includes('created'));
+  });
+
+  it('canvas_update: edits the existing canvas (append → insert_at_end)', async () => {
+    const slack = fakeSlack({ existingCanvasId: 'F123' });
+    const p = proposal({ type: 'canvas_update', payload: { channelId: 'C0INT', markdown: 'more', mode: 'append' } });
+    const result = await executeProposal(p, conventions(), fakeClickUp, slack);
+    assert.strictEqual(slack.canvases.edit.mock.callCount(), 1);
+    const arg = slack.canvases.edit.mock.calls[0].arguments[0];
+    assert.strictEqual(arg.canvas_id, 'F123');
+    assert.deepStrictEqual(arg.changes, [
+      { operation: 'insert_at_end', document_content: { type: 'markdown', markdown: 'more' } },
+    ]);
+    assert.strictEqual(slack.conversations.canvases.create.mock.callCount(), 0);
+    assert.ok(result.summary.includes('append'));
+  });
+
+  it('canvas_update: replace mode maps to a replace operation', async () => {
+    const slack = fakeSlack({ existingCanvasId: 'F123' });
+    const p = proposal({ type: 'canvas_update', payload: { channelId: 'C0INT', markdown: 'x', mode: 'replace' } });
+    await executeProposal(p, conventions(), fakeClickUp, slack);
+    assert.strictEqual(slack.canvases.edit.mock.calls[0].arguments[0].changes[0].operation, 'replace');
+  });
+
+  it('canvas_update: refuses a client channel', async () => {
+    const slack = fakeSlack();
+    const p = proposal({ type: 'canvas_update', payload: { channelId: 'C0ACME', markdown: 'x' } });
+    await assert.rejects(
+      () => executeProposal(p, conventions(), fakeClickUp, slack),
+      /never creates or edits canvases in client channels/,
+    );
+    assert.strictEqual(slack.conversations.canvases.create.mock.callCount(), 0);
+  });
+
+  it('canvas_update: fails clearly without a Slack client', async () => {
+    const p = proposal({ type: 'canvas_update', payload: { channelId: 'C0INT', markdown: 'x' } });
+    await assert.rejects(() => executeProposal(p, conventions(), fakeClickUp, undefined), /require the Slack client/);
   });
 
   it('task: sets the Project Stage custom field when a stage was proposed', async () => {

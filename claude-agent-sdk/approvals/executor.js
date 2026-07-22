@@ -2,6 +2,7 @@ import {
   addClientToConventions,
   formatTaskName,
   getClickUpUserId,
+  isClientChannel,
   isKnownPriority,
   knownStatuses,
   resolvePriority,
@@ -52,9 +53,10 @@ function parseDueDate(dueDate) {
  * @param {import('./store.js').Proposal} proposal
  * @param {import('../config/index.js').Conventions} conventions
  * @param {typeof clickupDefault} [clickup] - Injectable for tests.
+ * @param {import('@slack/web-api').WebClient} [slack] - Bot Web API client, required for canvas writes.
  * @returns {Promise<{ summary: string }>}
  */
-export async function executeProposal(proposal, conventions, clickup = clickupDefault) {
+export async function executeProposal(proposal, conventions, clickup = clickupDefault, slack = undefined) {
   const p = proposal.payload;
 
   switch (proposal.type) {
@@ -283,6 +285,51 @@ export async function executeProposal(proposal, conventions, clickup = clickupDe
       return {
         summary: `Client *${p.entry.display_name}* registered as \`${p.clientKey}\` — config reloaded, no restart needed.${noteLines}`,
       };
+    }
+
+    case 'canvas_update': {
+      if (!slack) throw new Error('Canvas updates require the Slack client (internal error).');
+      const channelId = p.channelId;
+      // Hard rule: the bot never touches client channels. Guarded at propose
+      // time too, but re-checked here in code.
+      if (isClientChannel(conventions, channelId)) {
+        throw new Error('Refused: the bot never creates or edits canvases in client channels.');
+      }
+      const mode = p.mode || 'replace';
+      const documentContent = { type: /** @type {'markdown'} */ ('markdown'), markdown: p.markdown };
+
+      // A channel has at most one canvas; find it via conversations.info before
+      // deciding whether to create or edit.
+      let canvasId = null;
+      try {
+        const info = /** @type {any} */ (await slack.conversations.info({ channel: channelId }));
+        canvasId = info?.channel?.properties?.canvas?.file_id || info?.channel?.properties?.canvas?.document_id || null;
+      } catch {
+        // Fall through to create; if a canvas actually exists the create call
+        // reports it and we surface a clear message.
+      }
+
+      if (canvasId) {
+        const operation = mode === 'append' ? 'insert_at_end' : mode === 'prepend' ? 'insert_at_start' : 'replace';
+        await slack.canvases.edit({ canvas_id: canvasId, changes: [{ operation, document_content: documentContent }] });
+        return { summary: `Canvas updated (${mode}) in <#${channelId}>.` };
+      }
+
+      try {
+        await slack.conversations.canvases.create({
+          channel_id: channelId,
+          document_content: documentContent,
+          ...(p.title ? { title: p.title } : {}),
+        });
+      } catch (e) {
+        if (/** @type {any} */ (e)?.data?.error === 'channel_canvas_already_exists') {
+          throw new Error(
+            'This channel already has a canvas but its ID could not be resolved — try again, or edit it manually once.',
+          );
+        }
+        throw e;
+      }
+      return { summary: `Canvas created in <#${channelId}>.` };
     }
 
     default:

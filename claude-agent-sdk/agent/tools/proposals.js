@@ -12,6 +12,7 @@ import {
 import { proposalStore } from '../../approvals/store.js';
 import { isClientChannel, isKnownPriority, isLead, knownStatuses, resolveStatus } from '../../config/index.js';
 import * as clickupMcp from '../../integrations/clickup-mcp.js';
+import { lookupChannelIdByName, resolveChannelArg } from './slack-read.js';
 
 /** @param {string} text @returns {{ content: [{ type: 'text', text: string }] }} */
 function asResult(text) {
@@ -378,6 +379,39 @@ export function createProposalTools(deps, conventions) {
       ),
   );
 
+  const proposeCanvasUpdate = tool(
+    'propose_canvas_update',
+    'Create or edit a channel canvas. Target an internal channel ("{key}-internal"), a channel name, or a channel ID ' +
+      '— NEVER a client channel (a bare client key resolves to the client channel and is refused). Content is ' +
+      'Markdown. mode "replace" sets the whole canvas, "append" adds to the end, "prepend" adds to the top.',
+    {
+      channel: z.string().describe('Internal channel ("{key}-internal"), channel name, or channel ID.'),
+      markdown: z.string().describe('Canvas content in Markdown.'),
+      mode: z.enum(['replace', 'append', 'prepend']).optional().describe('Default replace.'),
+      title: z.string().optional().describe('Canvas title — used only when creating a new canvas.'),
+    },
+    async ({ channel, markdown, mode, title }) => {
+      const resolved = resolveChannelArg(conventions, channel);
+      let channelId = resolved.id;
+      if (!channelId && resolved.lookupName) {
+        channelId = await lookupChannelIdByName(deps.client, resolved.lookupName);
+      }
+      if (!channelId) {
+        return asResult(`No channel matching "${channel}" is visible to the bot.`);
+      }
+      if (isClientChannel(conventions, channelId)) {
+        return asResult('Refused: the bot never creates or edits canvases in client channels.');
+      }
+      return postProposal('canvas_update', {
+        channelId,
+        channelLabel: channel,
+        markdown,
+        mode: mode || 'replace',
+        title,
+      });
+    },
+  );
+
   return [
     proposeTask,
     proposeTaskUpdate,
@@ -387,5 +421,6 @@ export function createProposalTools(deps, conventions) {
     proposeClientUpdate,
     proposeClientRegistration,
     proposeAutomationIdea,
+    proposeCanvasUpdate,
   ];
 }

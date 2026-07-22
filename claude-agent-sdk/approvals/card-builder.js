@@ -13,6 +13,7 @@ const HEADINGS = {
   client_update: ':newspaper: Client update draft',
   client_registration: ':card_index: Register client',
   automation_idea: ':bulb: Automation idea',
+  canvas_update: ':scroll: Channel canvas',
 };
 
 /**
@@ -95,6 +96,19 @@ function summarizePayload(proposal) {
       const lines = [`*Idea:* ${p.title}`];
       if (p.description) lines.push(`*Details:* ${p.description}`);
       lines.push('_Goes into the Automation Ideas list (Operations space)._');
+      return lines.join('\n');
+    }
+    case 'canvas_update': {
+      const action =
+        { replace: 'Replace the canvas content', append: 'Append to the canvas', prepend: 'Prepend to the canvas' }[
+          /** @type {string} */ (p.mode || 'replace')
+        ] || 'Update the canvas';
+      const md = String(p.markdown || '');
+      const previewLines = md.split('\n').slice(0, 8);
+      const preview = previewLines.join('\n') + (md.split('\n').length > previewLines.length ? '\n…' : '');
+      const lines = [`*Channel:* <#${p.channelId}>`, `*Action:* ${action}`];
+      if (p.title) lines.push(`*Title:* ${p.title}`);
+      lines.push(`*Content:*\n${preview}`);
       return lines.join('\n');
     }
     default:

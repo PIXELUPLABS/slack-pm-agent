@@ -154,6 +154,13 @@
       "list_id": "901615875495",
       "qa_list_id": "901615877053",
       "folder_id": "901610395686"
+    },
+    "induction": {
+      "display_name": "Induction",
+      "channel_id": "C_TODO_INDUCTION",
+      "list_id": "901616056242",
+      "qa_list_id": "901616056244",
+      "folder_id": "901610550022"
     }
   },
   "users": {
@@ -170,27 +177,27 @@
     "U09EDJSU2F4": {
       "name": "Dhruv",
       "clickup_user_id": 101029284,
-      "role": "member"
+      "role": "lead"
     },
     "U09RW8P7M9T": {
       "name": "Kashish",
       "clickup_user_id": 101030129,
-      "role": "member"
+      "role": "lead"
     },
     "U08GW0745H8": {
       "name": "Rinkesh Bist",
       "clickup_user_id": 101029288,
-      "role": "member"
+      "role": "lead"
     },
     "U0A5CBCQWSY": {
       "name": "Krish Savani",
       "clickup_user_id": 101030128,
-      "role": "member"
+      "role": "lead"
     },
     "U0AFB7QV8S0": {
       "name": "Fahad",
       "clickup_user_id": 101029285,
-      "role": "member"
+      "role": "lead"
     }
   },
   "internal_lists": {

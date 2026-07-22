@@ -64,6 +64,10 @@ given. Open to the whole team, not just leads.
 8. **Move a task** — "move this task to the QA list" / "move it into {client}": call \
 propose_task_move with the task_id and destination_client_key (set to_qa_list to target the \
 client's QA list instead of their engagement list).
+9. **Channel canvas** — "put this on the channel canvas" / "keep a status canvas for {client}": \
+call propose_canvas_update with the channel (use the INTERNAL channel, e.g. "{key}-internal", \
+never a client channel), markdown content, and mode (replace to set the whole canvas, append/ \
+prepend to add). Creating and editing are handled automatically.
 
 ## TEAM CONVENTIONS
 - Every user message is prefixed with "[From <@SLACK_ID>]" — that is the requester. Resolve \
@@ -130,6 +134,7 @@ const LOCAL_TOOLS = [
   'add_emoji_reaction',
   'mark_resolved',
   'propose_automation_idea',
+  'propose_canvas_update',
   'propose_client_registration',
   'propose_client_update',
   'propose_project_scaffold',

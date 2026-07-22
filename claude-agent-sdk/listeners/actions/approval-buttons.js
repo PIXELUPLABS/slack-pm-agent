@@ -57,7 +57,8 @@ export async function handleProposalApprove({ ack, body, client, logger, respond
 
     proposalStore.setStatus(proposal.id, 'approved');
     try {
-      const result = await executeProposal(proposal, conventions);
+      // `client` (bot Web API) is needed for canvas writes; clickup defaults inside.
+      const result = await executeProposal(proposal, conventions, undefined, client);
       proposalStore.setStatus(proposal.id, 'executed');
       await updateCard(
         client,

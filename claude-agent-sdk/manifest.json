@@ -64,7 +64,9 @@
         "reactions:write",
         "reactions:read",
         "users:read",
-        "assistant:write"
+        "assistant:write",
+        "canvases:read",
+        "canvases:write"
       ]
     }
   },
