@@ -115,6 +115,7 @@
     "greptile": {
       "display_name": "Greptile",
       "channel_id": "C_TODO_GREPTILE",
+      "internal_channel_id": "C0869LPU5QD",
       "list_id": "901615128110",
       "qa_list_id": "",
       "folder_id": "90169789295"
@@ -136,6 +137,7 @@
     "crossword": {
       "display_name": "Crossword",
       "channel_id": "C_TODO_CROSSWORD",
+      "internal_channel_id": "C0BCKF2BZ2Q",
       "list_id": "901615572984",
       "qa_list_id": "",
       "folder_id": "901610143537"
@@ -158,6 +160,7 @@
     "induction": {
       "display_name": "Induction",
       "channel_id": "C_TODO_INDUCTION",
+      "internal_channel_id": "C0BJG2RB9HT",
       "list_id": "901616056242",
       "qa_list_id": "901616056244",
       "folder_id": "901610550022"
@@ -208,7 +211,8 @@
     }
   },
   "channels": {
-    "drafts_channel_id": ""
+    "drafts_channel_id": "",
+    "conversation_channel_ids": ["C0881HC64Q6", "C096YRP55NV", "C0BGPFL3MMY"]
   },
   "client_updates": {
     "enabled": false,

@@ -38,7 +38,7 @@ function validData() {
       U0LEAD: { name: 'Lead', clickup_user_id: 1, role: 'lead' },
       U0MEMBER: { name: 'Member', clickup_user_id: 2, role: 'member' },
     },
-    channels: { drafts_channel_id: 'C0DRAFTS' },
+    channels: { drafts_channel_id: 'C0DRAFTS', conversation_channel_ids: ['C0TEAM1', 'C0TEAM2'] },
     client_updates: { enabled: false, days: ['tuesday', 'friday'], hour: 9, minute: 0, timezone: 'UTC' },
   };
 }
@@ -115,6 +115,8 @@ describe('helpers', () => {
   it('isConversationChannel allows only internal + drafts channels (default-deny)', () => {
     assert.strictEqual(isConversationChannel(conventions, 'C0ACMEINT'), true);
     assert.strictEqual(isConversationChannel(conventions, 'C0DRAFTS'), true);
+    assert.strictEqual(isConversationChannel(conventions, 'C0TEAM1'), true); // extra conversation channel
+    assert.strictEqual(isConversationChannel(conventions, 'C0TEAM2'), true);
     assert.strictEqual(isConversationChannel(conventions, 'C0ACME'), false); // client channel
     assert.strictEqual(isConversationChannel(conventions, 'C0RANDOM'), false); // unmapped channel
     assert.strictEqual(isConversationChannel(conventions, ''), false);

@@ -32,7 +32,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
  * @property {Record<string, ClientConfig>} clients
  * @property {Record<string, UserConfig>} users
  * @property {Record<string, InternalListConfig>} [internal_lists] - Non-client ClickUp lists (e.g. Automation Ideas in Operations) the agent may log to.
- * @property {{ drafts_channel_id: string }} channels
+ * @property {{ drafts_channel_id: string, conversation_channel_ids?: string[] }} channels
  * @property {{ enabled: boolean, days: string[], hour: number, minute: number, timezone: string }} client_updates
  */
 
@@ -87,6 +87,15 @@ export function validateConventions(data) {
       if (typeof u?.name !== 'string') problems.push(`users.${slackId}.name must be a string`);
       if (typeof u?.clickup_user_id !== 'number') problems.push(`users.${slackId}.clickup_user_id must be a number`);
       if (u?.role !== 'lead' && u?.role !== 'member') problems.push(`users.${slackId}.role must be "lead" or "member"`);
+    }
+  }
+
+  if (data.channels && data.channels.conversation_channel_ids !== undefined) {
+    if (
+      !Array.isArray(data.channels.conversation_channel_ids) ||
+      data.channels.conversation_channel_ids.some((/** @type {any} */ id) => typeof id !== 'string')
+    ) {
+      problems.push('channels.conversation_channel_ids must be an array of strings when present');
     }
   }
 
@@ -206,6 +215,7 @@ export function isClientChannel(conventions, channelId) {
 export function isConversationChannel(conventions, channelId) {
   if (!channelId) return false;
   if (conventions.channels.drafts_channel_id === channelId) return true;
+  if (conventions.channels.conversation_channel_ids?.includes(channelId)) return true;
   for (const client of Object.values(conventions.clients)) {
     if (client.internal_channel_id === channelId) return true;
   }
