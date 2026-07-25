@@ -65,10 +65,9 @@ export async function handleMessage({ client, context, event, logger, say, saySt
   // Skip message subtypes (edits, deletes, etc.) — but keep file shares.
   if (!isProcessableMessage(event)) return;
 
-  // Default-deny, enforced in code: outside DMs the bot converses only in
-  // the internal channels listed in config. Client channels (mapped or not)
-  // are read-only — it reads them via tools, but no reply, reaction, or card
-  // ever lands there.
+  // Enforced in code: outside DMs the bot converses in any channel it has been
+  // invited to. Configured client channels stay read-only — it reads them via
+  // tools, but no reply, reaction, or card ever lands there.
   if (event.channel_type !== 'im' && !isConversationChannel(loadConventions(), event.channel)) return;
 
   // Issue submissions are posted by the bot with metadata so the message

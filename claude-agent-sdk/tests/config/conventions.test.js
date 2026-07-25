@@ -112,13 +112,13 @@ describe('helpers', () => {
     assert.strictEqual(isClientChannel(conventions, 'C0DRAFTS'), false);
   });
 
-  it('isConversationChannel allows only internal + drafts channels (default-deny)', () => {
+  it('isConversationChannel allows any invited channel except client channels', () => {
     assert.strictEqual(isConversationChannel(conventions, 'C0ACMEINT'), true);
     assert.strictEqual(isConversationChannel(conventions, 'C0DRAFTS'), true);
     assert.strictEqual(isConversationChannel(conventions, 'C0TEAM1'), true); // extra conversation channel
     assert.strictEqual(isConversationChannel(conventions, 'C0TEAM2'), true);
-    assert.strictEqual(isConversationChannel(conventions, 'C0ACME'), false); // client channel
-    assert.strictEqual(isConversationChannel(conventions, 'C0RANDOM'), false); // unmapped channel
+    assert.strictEqual(isConversationChannel(conventions, 'C0RANDOM'), true); // any invited (non-client) channel
+    assert.strictEqual(isConversationChannel(conventions, 'C0ACME'), false); // client channel — read-only, always
     assert.strictEqual(isConversationChannel(conventions, ''), false);
   });
 

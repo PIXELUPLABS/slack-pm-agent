@@ -17,7 +17,16 @@
       "internal_channel_id": "C0INTERNAL0",
       "list_id": "900000000001",
       "qa_list_id": "900000000002",
-      "folder_id": "800000000001"
+      "folder_id": "800000000001",
+      "aliases": ["ExampleCo"],
+      "email_domains": ["example.com"]
+    },
+    "no-internal": {
+      "display_name": "Nointernal",
+      "channel_id": "C0EXTERNAL9",
+      "list_id": "900000000003",
+      "qa_list_id": "900000000004",
+      "folder_id": "800000000002"
     }
   },
   "users": {
@@ -33,5 +42,10 @@
     "hour": 9,
     "minute": 0,
     "timezone": "America/New_York"
+  },
+  "meeting_transcripts": {
+    "enabled": true,
+    "channel_id": "C0TRANSCRIPT",
+    "internal_email_domains": ["pixelup.in"]
   }
 }

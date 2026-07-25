@@ -164,6 +164,15 @@
       "list_id": "901616056242",
       "qa_list_id": "901616056244",
       "folder_id": "901610550022"
+    },
+    "fuseai": {
+      "display_name": "Fuse AI",
+      "channel_id": "",
+      "internal_channel_id": "C0BKJHRFXPC",
+      "list_id": "",
+      "qa_list_id": "",
+      "folder_id": "",
+      "aliases": ["Fuse", "FuseAI"]
     }
   },
   "users": {
@@ -220,5 +229,10 @@
     "hour": 9,
     "minute": 0,
     "timezone": "Asia/Kolkata"
+  },
+  "meeting_transcripts": {
+    "enabled": true,
+    "channel_id": "C096YRP55NV",
+    "internal_email_domains": ["pixelup.in"]
   }
 }

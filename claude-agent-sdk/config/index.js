@@ -8,6 +8,8 @@ import { readFileSync, writeFileSync } from 'node:fs';
  * @property {string} list_id
  * @property {string} qa_list_id
  * @property {string} folder_id
+ * @property {string[]} [aliases] - Extra names a meeting title may use for this client (matched case-insensitively).
+ * @property {string[]} [email_domains] - Participant email domains that identify this client (e.g. "crossword.ai").
  */
 
 /**
@@ -34,6 +36,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
  * @property {Record<string, InternalListConfig>} [internal_lists] - Non-client ClickUp lists (e.g. Automation Ideas in Operations) the agent may log to.
  * @property {{ drafts_channel_id: string, conversation_channel_ids?: string[] }} channels
  * @property {{ enabled: boolean, days: string[], hour: number, minute: number, timezone: string }} client_updates
+ * @property {{ enabled?: boolean, channel_id: string, internal_email_domains?: string[] }} [meeting_transcripts] - Fireflies transcript → internal recap automation.
  */
 
 const DEFAULT_PATH = new URL('./conventions.json', import.meta.url);
@@ -78,6 +81,15 @@ export function validateConventions(data) {
       if (internal !== undefined && typeof internal !== 'string') {
         problems.push(`clients.${key}.internal_channel_id must be a string when present`);
       }
+      for (const listField of ['aliases', 'email_domains']) {
+        const value = /** @type {any} */ (client)?.[listField];
+        if (
+          value !== undefined &&
+          (!Array.isArray(value) || value.some((/** @type {any} */ v) => typeof v !== 'string'))
+        ) {
+          problems.push(`clients.${key}.${listField} must be an array of strings when present`);
+        }
+      }
     }
   }
 
@@ -103,6 +115,25 @@ export function validateConventions(data) {
     const validDays = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
     for (const day of data.client_updates.days || []) {
       if (!validDays.includes(day)) problems.push(`client_updates.days contains invalid day "${day}"`);
+    }
+  }
+
+  if (data.meeting_transcripts !== undefined) {
+    const mt = data.meeting_transcripts;
+    if (!mt || typeof mt !== 'object') {
+      problems.push('meeting_transcripts must be an object when present');
+    } else {
+      if (typeof mt.channel_id !== 'string') problems.push('meeting_transcripts.channel_id must be a string');
+      if (mt.enabled !== undefined && typeof mt.enabled !== 'boolean') {
+        problems.push('meeting_transcripts.enabled must be a boolean when present');
+      }
+      if (
+        mt.internal_email_domains !== undefined &&
+        (!Array.isArray(mt.internal_email_domains) ||
+          mt.internal_email_domains.some((/** @type {any} */ d) => typeof d !== 'string'))
+      ) {
+        problems.push('meeting_transcripts.internal_email_domains must be an array of strings when present');
+      }
     }
   }
 
@@ -205,21 +236,19 @@ export function isClientChannel(conventions, channelId) {
 }
 
 /**
- * Channels the bot is allowed to CONVERSE in (beyond DMs): the clients'
- * internal channels and the drafts channel. Everything else — client
- * channels, general channels, anything unmapped — is read-only silence.
+ * Channels the bot is allowed to CONVERSE in (beyond DMs): any channel it has
+ * been invited to — Slack only delivers channel events for channels the bot is
+ * a member of, so receiving the event IS the membership signal. The sole
+ * exception is configured client channels, which stay read-only silence: the
+ * bot reads them via tools but never posts, reacts, or renders a card there —
+ * the client sees nothing, ever (hard rule).
  * @param {Conventions} conventions
  * @param {string} channelId
  * @returns {boolean}
  */
 export function isConversationChannel(conventions, channelId) {
   if (!channelId) return false;
-  if (conventions.channels.drafts_channel_id === channelId) return true;
-  if (conventions.channels.conversation_channel_ids?.includes(channelId)) return true;
-  for (const client of Object.values(conventions.clients)) {
-    if (client.internal_channel_id === channelId) return true;
-  }
-  return false;
+  return !isClientChannel(conventions, channelId);
 }
 
 /**

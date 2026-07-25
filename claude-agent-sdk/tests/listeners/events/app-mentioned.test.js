@@ -46,18 +46,17 @@ describe('handleAppMentioned default-deny', () => {
     assert.strictEqual(fakeLogger.info.mock.callCount(), 1);
   });
 
-  it('stays silent in unmapped channels too (default-deny)', async () => {
+  it('responds in unmapped channels it has been invited to (empty mention → greeting)', async () => {
     await handleAppMentioned({
       client: fakeClient,
       context: fakeContext,
-      event: event(UNMAPPED_CHANNEL, '<@U0BOT> hello'),
+      event: event(UNMAPPED_CHANNEL, '<@U0BOT>'),
       logger: fakeLogger,
       say: fakeSay,
       sayStream: mock.fn(),
       setStatus: fakeSetStatus,
     });
-    assert.strictEqual(fakeSay.mock.callCount(), 0);
-    assert.strictEqual(fakeClient.reactions.add.mock.callCount(), 0);
+    assert.strictEqual(fakeSay.mock.callCount(), 1);
   });
 
   it('responds in configured internal channels (empty mention → greeting)', async () => {

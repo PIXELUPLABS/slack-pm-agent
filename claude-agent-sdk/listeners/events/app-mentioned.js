@@ -12,11 +12,11 @@ export async function handleAppMentioned({ client, context, event, logger, say, 
   try {
     const channelId = event.channel;
 
-    // Default-deny, enforced in code: the bot converses only in DMs and the
-    // internal channels listed in config. Client channels (mapped or not),
-    // general channels — read-only silence, even when @mentioned.
+    // Enforced in code: the bot converses in DMs and any channel it has been
+    // invited to. The one exception is configured client channels — read-only
+    // silence, even when @mentioned, so the client never sees the bot.
     if (!isConversationChannel(loadConventions(), channelId)) {
-      logger.info(`Ignored app_mention in ${channelId} — not a configured internal channel; the bot stays silent.`);
+      logger.info(`Ignored app_mention in ${channelId} — configured client channel; the bot stays silent.`);
       return;
     }
 
