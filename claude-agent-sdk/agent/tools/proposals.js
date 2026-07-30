@@ -46,7 +46,7 @@ function cleanReferences(urls) {
  * structured JSON and posts a Block Kit approval card; deterministic code in
  * approvals/executor.js runs it after a human approves. The agent never
  * writes directly.
- * @param {{ client: import('@slack/web-api').WebClient, userId: string, channelId: string, threadTs: string }} deps
+ * @param {{ client: import('@slack/web-api').WebClient, userId: string, channelId: string, threadTs: string, channelType?: string }} deps
  * @param {import('../../config/index.js').Conventions} conventions
  * @returns {any[]}
  */
@@ -63,7 +63,13 @@ export function createProposalTools(deps, conventions) {
     // Hard rule: no bot messages in client channels — refuse in code even if
     // something upstream slipped through. Resolved by channel name and
     // fail-closed, so an unmapped or brand-new client channel is still refused.
-    const post = await canBotPostInChannel({ client: deps.client, conventions, channelId: channel });
+    const post = await canBotPostInChannel({
+      client: deps.client,
+      conventions,
+      channelId: channel,
+      // Only meaningful for the current channel; a targeted channel is resolved by name.
+      ...(channel === deps.channelId && { channelType: deps.channelType }),
+    });
     if (!post.allowed) {
       return asResult(`Refused: approval cards can never be posted in client channels (${post.reason}).`);
     }

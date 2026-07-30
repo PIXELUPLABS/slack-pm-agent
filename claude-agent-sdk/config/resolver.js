@@ -143,6 +143,13 @@ export async function canBotPostInChannel({ client, conventions, channelId, chan
   if (channelType === 'im' || channelType === 'mpim') {
     return { allowed: true, reason: `direct conversation (${channelType})` };
   }
+  // A `D…` ID is always an IM — there is no such thing as a client-facing DM,
+  // and `conversations.info` on one returns no name, which would otherwise trip
+  // the fail-closed branch below. This makes the carve-out work even for callers
+  // that have no channelType to pass (e.g. the proposal tools).
+  if (/^D[A-Z0-9]/.test(channelId)) {
+    return { allowed: true, reason: 'direct message' };
+  }
   const ctx = await resolveChannelContext({ client, conventions, channelId });
   if (!ctx.resolved) {
     return { allowed: false, reason: `could not identify channel ${channelId} — staying silent (fail-closed)` };

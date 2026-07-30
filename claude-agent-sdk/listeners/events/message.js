@@ -17,6 +17,28 @@ function isProcessableMessage(event) {
 }
 
 /**
+ * Reporting keywords the team uses to file issues about the bot itself:
+ * a DM starting with "bug:" or "feature:". Detected in CODE rather than left to
+ * the model, so the routing and the kind are never a judgement call — the model
+ * still writes the title and pulls in screenshots.
+ *
+ * Deliberately anchored to the start of the message: "there's a bug in the
+ * client's site" mid-sentence is not a report about us.
+ */
+const ISSUE_KEYWORD = /^\s*(bug|feature)\s*[:\-–—]\s*/i;
+
+/**
+ * @param {string} text
+ * @returns {{ kind: 'bug' | 'feature', body: string } | null}
+ */
+export function parseIssueKeyword(text) {
+  const match = (text || '').match(ISSUE_KEYWORD);
+  if (!match) return null;
+  const kind = /** @type {'bug' | 'feature'} */ (match[1].toLowerCase());
+  return { kind, body: (text || '').slice(match[0].length).trim() };
+}
+
+/**
  * Files seen per thread, so later messages can still reference them — a
  * resumed session (or a forgetful model) can re-read a doc shared earlier
  * instead of asking for it again. In-memory, capped, same tradeoffs as the
@@ -121,6 +143,17 @@ export async function handleMessage({ client, context, event, logger, say, saySt
       text += `\n\n[Files shared in this thread (readable with read_shared_file):\n${fileList}]`;
     }
 
+    // "bug:" / "feature:" is the team's shorthand for reporting the BOT itself.
+    // Matching here means the kind never depends on the model's judgement.
+    const keyword = parseIssueKeyword(event.text || '');
+    if (keyword) {
+      text +=
+        `\n\n[Reporting keyword detected: this is a "${keyword.kind}" report about the bot itself. ` +
+        `Call propose_pm_agent_issue with kind: "${keyword.kind}" — do not ask which kind it is, and do not ` +
+        'treat it as client work. Write the title from what follows the keyword, and pass every file id above ' +
+        'as screenshot_file_ids.]';
+    }
+
     // For issue submissions the bot posted the message, so the real
     // user_id comes from the metadata rather than the event context.
     const userId = /** @type {string} */ (issueMetadata ? issueMetadata.event_payload.user_id : context.userId);
@@ -148,7 +181,16 @@ export async function handleMessage({ client, context, event, logger, say, saySt
     });
 
     // Run the agent with deps for tool access
-    const deps = { client, userId, channelId, threadTs, messageTs: event.ts, userToken: context.userToken };
+    const deps = {
+      client,
+      userId,
+      channelId,
+      threadTs,
+      messageTs: event.ts,
+      // Lets the proposal tools know a DM is a DM (see canBotPostInChannel).
+      channelType: event.channel_type,
+      userToken: context.userToken,
+    };
     const { responseText, sessionId: newSessionId } = await runPixelupAgent(text, existingSessionId ?? undefined, deps);
 
     // Stream response in thread with feedback buttons

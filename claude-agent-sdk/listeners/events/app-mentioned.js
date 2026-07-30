@@ -67,7 +67,15 @@ export async function handleAppMentioned({ client, context, event, logger, say, 
     const existingSessionId = sessionStore.getSession(channelId, threadTs);
 
     // Run the agent with deps for tool access
-    const deps = { client, userId, channelId, threadTs, messageTs: event.ts, userToken: context.userToken };
+    const deps = {
+      client,
+      userId,
+      channelId,
+      threadTs,
+      messageTs: event.ts,
+      channelType: /** @type {any} */ (event).channel_type,
+      userToken: context.userToken,
+    };
     const { responseText, sessionId: newSessionId } = await runPixelupAgent(
       cleanedText,
       existingSessionId ?? undefined,

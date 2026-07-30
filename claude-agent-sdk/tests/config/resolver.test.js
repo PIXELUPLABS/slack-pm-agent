@@ -174,6 +174,22 @@ describe('canBotPostInChannel', () => {
     assert.strictEqual(client.conversations.info.mock.callCount(), 0);
   });
 
+  it('allows a DM by its channel ID alone, with no channelType and no lookup', async () => {
+    // Regression: the proposal tools have no channelType to pass, so a `D…` id
+    // must be enough. Without this, every card in a DM was refused fail-closed.
+    const client = slackWithNames({});
+    const res = await canBotPostInChannel({ client, conventions: conventions(), channelId: 'D09ABCDEF12' });
+    assert.strictEqual(res.allowed, true);
+    assert.strictEqual(client.conversations.info.mock.callCount(), 0);
+  });
+
+  it('does not treat a legacy G-prefixed private channel as a DM', async () => {
+    // `G…` was used for private channels too, so it must still be resolved.
+    const client = slackWithNames({ G0LEGACY: 'acme-pixelup' });
+    const res = await canBotPostInChannel({ client, conventions: conventions(), channelId: 'G0LEGACY' });
+    assert.strictEqual(res.allowed, false);
+  });
+
   it('allows internal channels, including per-client internal ones', async () => {
     const client = slackWithNames({ C0INT: 'acme-internal', C0TEAM: 'design-team' });
     const conv = conventions();
