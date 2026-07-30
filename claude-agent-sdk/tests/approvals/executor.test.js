@@ -23,6 +23,13 @@ function conventions() {
     },
     internal_lists: {
       automation_ideas: { display_name: 'Automation Ideas', list_id: 'AUTOLIST', default_status: 'backlog' },
+      pm_agent_issues: {
+        display_name: 'PM Agent Bugs / Ideas',
+        list_id: 'PMLIST',
+        default_status: 'backlog',
+        assignee_slack_id: 'U0LEAD',
+        kinds: { bug: { tag: 'bug', task_type: 'Bug' }, feature: { tag: 'feature', task_type: 'Feature' } },
+      },
     },
     channels: { drafts_channel_id: 'C0DRAFTS' },
     client_updates: { enabled: false, days: ['tuesday'], hour: 9, minute: 0, timezone: 'UTC' },
@@ -156,6 +163,152 @@ describe('executeProposal', () => {
     assert.strictEqual(fields.parent, 'parent99');
     assert.deepStrictEqual(fields.tags, ['design', 'urgent']);
     assert.strictEqual(fields.time_estimate, 150);
+  });
+
+  describe('pm_agent_issue', () => {
+    /** Slack fake with the file + user lookups the screenshot path needs. */
+    function slackWithFiles({ fileName = 'shot.png', bytes = 'PNGDATA', userName = 'Outside Person' } = {}) {
+      return {
+        conversations: { info: mock.fn(async () => ({ ok: true, channel: { name: 'pixelup-team' } })) },
+        files: {
+          info: mock.fn(async () => ({
+            ok: true,
+            file: { name: fileName, url_private_download: 'https://files.slack.com/x' },
+          })),
+        },
+        users: { info: mock.fn(async () => ({ ok: true, user: { profile: { real_name: userName } } })) },
+        token: 'xoxb-test',
+        _bytes: bytes,
+      };
+    }
+
+    it('bug: tags, types, assigns to the configured owner, and names the reporter', async () => {
+      const p = proposal({
+        type: 'pm_agent_issue',
+        requesterId: 'U0MEMBER',
+        payload: { kind: 'bug', title: 'Recap did not post', description: 'Ran it twice, nothing appeared.' },
+      });
+      const result = await executeProposal(p, conventions(), fakeClickUp, slackWithFiles());
+
+      const [listId, fields] = fakeClickUp.createTask.mock.calls[0].arguments;
+      assert.strictEqual(listId, 'PMLIST');
+      assert.strictEqual(fields.name, 'Recap did not post');
+      assert.strictEqual(fields.status, 'backlog');
+      assert.deepStrictEqual(fields.tags, ['bug']);
+      assert.strictEqual(fields.task_type, 'Bug');
+      // Everything in this list is assigned to the configured owner (the lead).
+      assert.deepStrictEqual(fields.assignees, [11]);
+      // Reporter by NAME, and no raw Slack mention.
+      assert.ok(fields.description.includes('Reported by Member via Slack DM.'));
+      assert.ok(!fields.description.includes('<@'));
+      assert.ok(result.summary.includes('Bug logged'));
+    });
+
+    it('feature: uses the feature tag and type', async () => {
+      const p = proposal({ type: 'pm_agent_issue', payload: { kind: 'feature', title: 'Support Loom links' } });
+      const result = await executeProposal(p, conventions(), fakeClickUp, slackWithFiles());
+      const [, fields] = fakeClickUp.createTask.mock.calls[0].arguments;
+      assert.deepStrictEqual(fields.tags, ['feature']);
+      assert.strictEqual(fields.task_type, 'Feature');
+      assert.ok(result.summary.includes('Feature request logged'));
+    });
+
+    it('names a reporter who is not in the config, via Slack', async () => {
+      const slack = slackWithFiles({ userName: 'New Designer' });
+      const p = proposal({ type: 'pm_agent_issue', requesterId: 'U0NEWBIE', payload: { kind: 'bug', title: 'x' } });
+      await executeProposal(p, conventions(), fakeClickUp, slack);
+      const [, fields] = fakeClickUp.createTask.mock.calls[0].arguments;
+      assert.ok(fields.description.includes('Reported by New Designer via Slack DM.'));
+      assert.strictEqual(slack.users.info.mock.callCount(), 1);
+    });
+
+    it('uploads screenshots as ClickUp attachments, never the Slack token', async () => {
+      const slack = slackWithFiles();
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = mock.fn(async () => ({
+        ok: true,
+        status: 200,
+        arrayBuffer: async () => new TextEncoder().encode('PNGDATA').buffer,
+      }));
+      const attach = mock.fn(async () => {});
+      try {
+        const p = proposal({
+          type: 'pm_agent_issue',
+          payload: { kind: 'bug', title: 'Card looks wrong', screenshotFileIds: ['F111', 'F222'] },
+        });
+        const result = await executeProposal(p, conventions(), { ...fakeClickUp, attachTaskFile: attach }, slack);
+
+        assert.strictEqual(attach.mock.callCount(), 2);
+        const [taskId, file] = attach.mock.calls[0].arguments;
+        assert.strictEqual(taskId, 't1');
+        assert.strictEqual(file.fileName, 'shot.png');
+        assert.ok(Buffer.isBuffer(file.data));
+        // Slack auth stayed on our side: the token went to Slack, not ClickUp.
+        const [, init] = globalThis.fetch.mock.calls[0].arguments;
+        assert.strictEqual(init.headers.Authorization, 'Bearer xoxb-test');
+        assert.ok(!JSON.stringify(attach.mock.calls[0].arguments).includes('xoxb-test'));
+        assert.ok(result.summary.includes('2 screenshots attached'));
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it('still logs the issue when a screenshot upload fails', async () => {
+      const slack = slackWithFiles();
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = mock.fn(async () => ({ ok: false, status: 404, arrayBuffer: async () => new ArrayBuffer(0) }));
+      try {
+        const p = proposal({ type: 'pm_agent_issue', payload: { kind: 'bug', title: 'x', screenshotFileIds: ['F1'] } });
+        const result = await executeProposal(p, conventions(), { ...fakeClickUp, attachTaskFile: mock.fn() }, slack);
+        assert.strictEqual(fakeClickUp.createTask.mock.callCount(), 1);
+        assert.ok(result.summary.includes('1 could not be attached'));
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it('retries without the task type when the workspace has no such type', async () => {
+      // "Feature" may not exist in the workspace; the report must still land.
+      let call = 0;
+      const clickup = {
+        ...fakeClickUp,
+        createTask: mock.fn(async (_listId, fields) => {
+          call += 1;
+          if (call === 1) throw new Error('Invalid task_type: Feature not found in workspace');
+          return { id: 't9', name: fields.name, url: 'https://cu/t9' };
+        }),
+      };
+      const p = proposal({ type: 'pm_agent_issue', payload: { kind: 'feature', title: 'Weekly digest' } });
+      const result = await executeProposal(p, conventions(), clickup, slackWithFiles());
+
+      assert.strictEqual(clickup.createTask.mock.callCount(), 2);
+      const [, retried] = clickup.createTask.mock.calls[1].arguments;
+      assert.strictEqual(retried.task_type, undefined);
+      assert.deepStrictEqual(retried.tags, ['feature']);
+      assert.ok(result.summary.includes('does not exist in the workspace'));
+    });
+
+    it('does not swallow unrelated create failures', async () => {
+      const clickup = {
+        ...fakeClickUp,
+        createTask: mock.fn(async () => {
+          throw new Error('rate limited');
+        }),
+      };
+      const p = proposal({ type: 'pm_agent_issue', payload: { kind: 'bug', title: 'x' } });
+      await assert.rejects(() => executeProposal(p, conventions(), clickup, slackWithFiles()), /rate limited/);
+      assert.strictEqual(clickup.createTask.mock.callCount(), 1);
+    });
+
+    it('fails clearly when the list is not configured', async () => {
+      const conv = conventions();
+      delete conv.internal_lists.pm_agent_issues;
+      const p = proposal({ type: 'pm_agent_issue', payload: { kind: 'bug', title: 'x' } });
+      await assert.rejects(
+        () => executeProposal(p, conv, fakeClickUp, slackWithFiles()),
+        /pm_agent_issues is not configured/,
+      );
+    });
   });
 
   it('task_move: moves into the client engagement list', async () => {
@@ -517,6 +670,20 @@ describe('executeProposal', () => {
 
 describe('canApprove', () => {
   const conv = conventions();
+
+  it('anyone who reports a bot bug can approve their own report, config or not', () => {
+    // The whole team files these, including people not in conventions.users.
+    const mine = proposal({ type: 'pm_agent_issue', requesterId: 'U0NEWBIE', payload: {} });
+    assert.strictEqual(canApprove(mine, 'U0NEWBIE', conv), true);
+    // ...but not someone else's, unless they are a lead.
+    assert.strictEqual(canApprove(mine, 'U0OTHER', conv), false);
+    assert.strictEqual(canApprove(mine, 'U0LEAD', conv), true);
+  });
+
+  it('an unconfigured user still cannot approve client work', () => {
+    const clientTask = proposal({ type: 'task', requesterId: 'U0NEWBIE', payload: {} });
+    assert.strictEqual(canApprove(clientTask, 'U0NEWBIE', conv), false);
+  });
 
   it('requester (member) can approve their own task proposal', () => {
     const p = proposal({ type: 'task', payload: {} });

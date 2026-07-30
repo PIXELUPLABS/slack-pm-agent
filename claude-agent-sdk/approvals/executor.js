@@ -77,6 +77,76 @@ export function referenceSection(refs) {
 }
 
 /**
+ * A human-readable reporter name. Config first (no API call for teammates), then
+ * a live Slack lookup so people who aren't in config are still named properly,
+ * then the raw ID as a last resort.
+ * @param {string} slackUserId
+ * @param {import('../config/index.js').Conventions} conventions
+ * @param {import('@slack/web-api').WebClient} [slack]
+ * @returns {Promise<string>}
+ */
+async function resolveReporterName(slackUserId, conventions, slack) {
+  const fromConfig = conventions.users[slackUserId]?.name;
+  if (fromConfig) return fromConfig;
+  if (slack) {
+    try {
+      const info = await slack.users.info({ user: slackUserId });
+      const user = /** @type {any} */ (info).user;
+      const name = user?.profile?.real_name || user?.real_name || user?.profile?.display_name || user?.name;
+      if (name) return name;
+    } catch {
+      // Fall through — attribution is nice to have, not worth failing the write.
+    }
+  }
+  return slackUserId;
+}
+
+/**
+ * Upload each screenshot to the ClickUp task. Bytes are pulled from Slack with
+ * our own bot token and posted as base64, so the Slack token is never handed to
+ * ClickUp. A failed upload never fails the task — the report is worth more than
+ * the image, so failures are reported in the summary instead.
+ * @param {string | undefined} taskId
+ * @param {string[] | undefined} fileIds
+ * @param {import('@slack/web-api').WebClient} [slack]
+ * @param {typeof clickupDefault} [clickup]
+ * @returns {Promise<{ note: string }>}
+ */
+async function attachScreenshots(taskId, fileIds, slack, clickup) {
+  const ids = Array.isArray(fileIds) ? fileIds.filter(Boolean) : [];
+  if (ids.length === 0 || !taskId || !slack || !clickup?.attachTaskFile) return { note: '' };
+
+  let ok = 0;
+  const failed = [];
+  for (const fileId of ids) {
+    try {
+      const info = await slack.files.info({ file: fileId });
+      const file = /** @type {any} */ (info).file;
+      const url = file?.url_private_download || file?.url_private;
+      if (!url) throw new Error('no download URL');
+      const res = await fetch(url, {
+        headers: { Authorization: `Bearer ${/** @type {any} */ (slack).token}` },
+        signal: AbortSignal.timeout(30000),
+      });
+      if (!res.ok) throw new Error(`Slack returned ${res.status}`);
+      const data = Buffer.from(await res.arrayBuffer());
+      if (data.subarray(0, 15).toString('latin1').trimStart().startsWith('<')) {
+        throw new Error('Slack returned a login page, not the file (missing files:read?)');
+      }
+      await clickup.attachTaskFile(taskId, { fileName: file.name || `${fileId}.png`, data });
+      ok += 1;
+    } catch {
+      failed.push(fileId);
+    }
+  }
+
+  const parts = [];
+  if (ok > 0) parts.push(`${ok} screenshot${ok === 1 ? '' : 's'} attached`);
+  if (failed.length > 0) parts.push(`${failed.length} could not be attached`);
+  return { note: parts.length > 0 ? ` — ${parts.join(', ')}.` : '' };
+}
+
+/**
  * Execute an approved proposal.
  * @param {import('./store.js').Proposal} proposal
  * @param {import('../config/index.js').Conventions} conventions
@@ -310,6 +380,55 @@ export async function executeProposal(proposal, conventions, clickup = clickupDe
       return { summary: `Automation idea logged: ${task.url ? `<${task.url}|${task.name}>` : task.name}` };
     }
 
+    case 'pm_agent_issue': {
+      const list = conventions.internal_lists?.pm_agent_issues;
+      if (!list) throw new Error('internal_lists.pm_agent_issues is not configured in conventions.json.');
+      const kind = list.kinds?.[p.kind];
+      if (!kind)
+        throw new Error(`No tag mapping for "${p.kind}" — add internal_lists.pm_agent_issues.kinds.${p.kind}.`);
+
+      // Attribute by human name, not a Slack mention: whoever picks this up in
+      // ClickUp can't resolve a <@U…>, and reporters may not be in config.
+      const reporter = await resolveReporterName(proposal.requesterId, conventions, slack);
+      const assignee = list.assignee_slack_id ? getClickUpUserId(conventions, list.assignee_slack_id) : null;
+
+      const fields = {
+        name: p.title,
+        description: [p.description, `Reported by ${reporter} via Slack DM.`].filter(Boolean).join('\n\n'),
+        status: list.default_status,
+        tags: [kind.tag],
+        ...(kind.task_type && { task_type: kind.task_type }),
+        ...(assignee !== null && { assignees: [assignee] }),
+      };
+
+      let task;
+      try {
+        task = await clickup.createTask(list.list_id, fields);
+      } catch (e) {
+        // A task type that doesn't exist in the workspace shouldn't lose the
+        // report — retry without it and say so, keeping the tag as the signal.
+        const message = /** @type {any} */ (e).message || '';
+        if (!kind.task_type || !/task[_ ]?type/i.test(message)) throw e;
+        const { task_type, ...withoutType } = fields;
+        task = await clickup.createTask(list.list_id, withoutType);
+        const link = task.url ? `<${task.url}|${task.name}>` : task.name;
+        return {
+          summary:
+            `${p.kind === 'bug' ? 'Bug' : 'Feature request'} logged: ${link} — tagged \`${kind.tag}\`, but the ` +
+            `"${task_type}" task type does not exist in the workspace, so the default type was used.`,
+        };
+      }
+
+      const attached = await attachScreenshots(task.id, p.screenshotFileIds, slack, clickup);
+      const link = task.url ? `<${task.url}|${task.name}>` : task.name;
+      return {
+        summary:
+          `${p.kind === 'bug' ? 'Bug' : 'Feature request'} logged: ${link} (\`${kind.tag}\`` +
+          `${assignee !== null ? `, assigned to ${conventions.users[/** @type {string} */ (list.assignee_slack_id)]?.name}` : ''})` +
+          `${attached.note}`,
+      };
+    }
+
     case 'client_registration': {
       // Writes to conventions.json (not ClickUp) and hot-reloads the config.
       addClientToConventions(p.clientKey, p.entry);
@@ -386,6 +505,12 @@ export function canApprove(proposal, userId, conventions) {
   const role = conventions.users[userId]?.role;
   if (proposal.type === 'scaffold' || proposal.type === 'client_update' || proposal.type === 'client_registration') {
     return role === 'lead';
+  }
+  // Bot bug/feature reports are about the bot itself, not client work, and the
+  // whole team files them — including people not (yet) in the config. Whoever
+  // reported it may approve their own; a lead may approve anyone's.
+  if (proposal.type === 'pm_agent_issue') {
+    return role === 'lead' || userId === proposal.requesterId;
   }
   return role === 'lead' || (userId === proposal.requesterId && role !== undefined);
 }

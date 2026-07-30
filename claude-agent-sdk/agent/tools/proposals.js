@@ -414,6 +414,59 @@ export function createProposalTools(deps, conventions) {
     },
   );
 
+  const proposePmAgentIssue = tool(
+    'propose_pm_agent_issue',
+    'Log a bug or feature request ABOUT THIS BOT to the PM Agent Bugs / Ideas list. Use this whenever a ' +
+      'teammate reports that the agent did something wrong, or asks for behaviour it does not have yet. ' +
+      'Open to anyone — no role needed. Always pass screenshot_file_ids for any image they attached.',
+    {
+      kind: z
+        .enum(['bug', 'feature'])
+        .describe(
+          'bug = the agent misbehaved or failed to do something it should already do. ' +
+            'feature = a request for behaviour it does not have yet. If genuinely unclear, ask before proposing.',
+        ),
+      title: z.string().max(120).describe('Short, specific summary — what broke, or what should exist.'),
+      description: z
+        .string()
+        .optional()
+        .describe(
+          "Detail in the reporter's own words: what they did, what happened, what they expected. " +
+            'Do not add a "reported by" line — code adds that.',
+        ),
+      screenshot_file_ids: z
+        .array(z.string())
+        .max(10)
+        .optional()
+        .describe(
+          'Slack file IDs (the "id: F…" values shown for files shared in this thread) for every screenshot ' +
+            'or image the reporter attached. They are uploaded as attachments on the ClickUp task.',
+        ),
+    },
+    ({ kind, title, description, screenshot_file_ids }) => {
+      const list = conventions.internal_lists?.pm_agent_issues;
+      if (!list) {
+        return Promise.resolve(
+          asResult(
+            'The PM Agent Bugs / Ideas list is not configured yet — add internal_lists.pm_agent_issues.list_id ' +
+              'in config/conventions.json and restart the bot.',
+          ),
+        );
+      }
+      if (!list.kinds?.[kind]) {
+        return Promise.resolve(
+          asResult(`"${kind}" has no tag mapping — add internal_lists.pm_agent_issues.kinds.${kind} in config.`),
+        );
+      }
+      return postProposal('pm_agent_issue', {
+        kind,
+        title,
+        description,
+        screenshotFileIds: Array.isArray(screenshot_file_ids) ? screenshot_file_ids.slice(0, 10) : undefined,
+      });
+    },
+  );
+
   const proposeTaskMove = tool(
     'propose_task_move',
     "Propose moving an existing task into a different client's list. Moves into the client's engagement list by " +
@@ -477,6 +530,7 @@ export function createProposalTools(deps, conventions) {
     proposeClientUpdate,
     proposeClientRegistration,
     proposeAutomationIdea,
+    proposePmAgentIssue,
     proposeCanvasUpdate,
   ];
 }

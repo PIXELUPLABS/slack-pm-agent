@@ -23,6 +23,7 @@ const WRITE_TOOLS = {
   moveTask: 'clickup_move_task',
   createListInFolder: 'clickup_create_list_in_folder',
   addTaskDependency: 'clickup_add_task_dependency',
+  attachTaskFile: 'clickup_attach_task_file',
 };
 
 /** ClickUp's canonical priority names, keyed by numeric priority. */
@@ -54,6 +55,8 @@ export function toMcpTaskArgs(fields) {
   if (fields.status) args.status = fields.status;
   if (fields.parent) args.parent = fields.parent;
   if (Array.isArray(fields.tags) && fields.tags.length > 0) args.tags = fields.tags;
+  // ClickUp task type by NAME ("Bug", "Feature"); must exist in the workspace.
+  if (fields.task_type) args.task_type = fields.task_type;
   // The MCP tool takes time_estimate as a string count of minutes (verified live).
   if (fields.time_estimate !== undefined) args.time_estimate = String(fields.time_estimate);
   if (Array.isArray(fields.custom_fields) && fields.custom_fields.length > 0) {
@@ -159,6 +162,7 @@ export function extractTaskRef(text) {
  * @property {string} [status]
  * @property {string} [parent] - Parent task ID; creates this task as a subtask.
  * @property {string[]} [tags] - Tag names (must already exist in the space).
+ * @property {string} [task_type] - ClickUp task type name (e.g. "Bug"); must exist in the workspace.
  * @property {number} [time_estimate] - Time estimate in minutes.
  * @property {Array<{ id: string, value: any }>} [custom_fields]
  */
@@ -216,6 +220,23 @@ export async function getHierarchy() {
   const text = await callTool('clickup_get_workspace_hierarchy', { max_depth: '2', limit: 50 });
   const data = JSON.parse(text);
   return data.hierarchy?.root;
+}
+
+/**
+ * Attach a file to a task by uploading its BYTES (base64), not by handing
+ * ClickUp a URL. The screenshots come from Slack behind `url_private`, and the
+ * URL form of this tool would require passing our Slack bot token to the
+ * ClickUp MCP server as an `auth_header` — the token stays on our side instead.
+ * @param {string} taskId
+ * @param {{ fileName: string, data: Buffer }} file
+ * @returns {Promise<void>}
+ */
+export async function attachTaskFile(taskId, file) {
+  await callTool(WRITE_TOOLS.attachTaskFile, {
+    task_id: taskId,
+    file_name: file.fileName,
+    file_data: file.data.toString('base64'),
+  });
 }
 
 /**

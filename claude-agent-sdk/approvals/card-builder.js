@@ -13,6 +13,7 @@ const HEADINGS = {
   client_update: ':newspaper: Client update draft',
   client_registration: ':card_index: Register client',
   automation_idea: ':bulb: Automation idea',
+  pm_agent_issue: ':robot_face: PM Agent bug / idea',
   canvas_update: ':scroll: Channel canvas',
 };
 
@@ -98,6 +99,15 @@ function summarizePayload(proposal) {
       lines.push('_Approving writes this entry to conventions.json and reloads the config._');
       return lines.join('\n');
     }
+    case 'pm_agent_issue': {
+      const lines = [`*${p.kind === 'bug' ? 'Bug' : 'Feature request'}:* ${p.title}`];
+      if (p.description) lines.push(`*Details:* ${p.description}`);
+      const shots = p.screenshotFileIds?.length || 0;
+      if (shots > 0) lines.push(`*Screenshots:* ${shots} will be attached to the task`);
+      lines.push(`_Goes into PM Agent Bugs / Ideas, tagged \`${p.kind}\` and assigned for triage._`);
+      return lines.join('\n');
+    }
+
     case 'automation_idea': {
       const lines = [`*Idea:* ${p.title}`];
       if (p.description) lines.push(`*Details:* ${p.description}`);

@@ -217,6 +217,22 @@
       "display_name": "Automation Ideas",
       "list_id": "901615834917",
       "default_status": "backlog"
+    },
+    "pm_agent_issues": {
+      "display_name": "PM Agent Bugs / Ideas",
+      "list_id": "901616224168",
+      "default_status": "backlog",
+      "assignee_slack_id": "U09RKSU0QSX",
+      "kinds": {
+        "bug": {
+          "tag": "bug",
+          "task_type": "Bug"
+        },
+        "feature": {
+          "tag": "feature",
+          "task_type": "Feature"
+        }
+      }
     }
   },
   "channels": {

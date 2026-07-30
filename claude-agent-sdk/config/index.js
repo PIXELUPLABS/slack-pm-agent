@@ -22,10 +22,18 @@ import { isPlaceholderId, resetResolverCache } from './resolver.js';
  */
 
 /**
+ * @typedef {Object} IssueKindConfig
+ * @property {string} tag - ClickUp tag name; must already exist in the space.
+ * @property {string} [task_type] - ClickUp task type name (e.g. "Bug"). Omitted → the list's default type.
+ */
+
+/**
  * @typedef {Object} InternalListConfig
  * @property {string} display_name
  * @property {string} list_id
  * @property {string} [default_status] - This list has its own status pipeline, separate from clickup.statuses.
+ * @property {string} [assignee_slack_id] - Everything logged here is assigned to this person.
+ * @property {Record<string, IssueKindConfig>} [kinds] - Tag/type per issue kind (bug, feature).
  */
 
 /**
@@ -149,6 +157,24 @@ export function validateConventions(data) {
       const defaultStatus = /** @type {any} */ (list)?.default_status;
       if (defaultStatus !== undefined && typeof defaultStatus !== 'string') {
         problems.push(`internal_lists.${key}.default_status must be a string when present`);
+      }
+      const assignee = /** @type {any} */ (list)?.assignee_slack_id;
+      if (assignee !== undefined && typeof assignee !== 'string') {
+        problems.push(`internal_lists.${key}.assignee_slack_id must be a string when present`);
+      }
+      const kinds = /** @type {any} */ (list)?.kinds;
+      if (kinds !== undefined) {
+        if (!kinds || typeof kinds !== 'object') {
+          problems.push(`internal_lists.${key}.kinds must be an object when present`);
+        } else {
+          for (const [kind, spec] of Object.entries(kinds)) {
+            const s = /** @type {any} */ (spec);
+            if (typeof s?.tag !== 'string') problems.push(`internal_lists.${key}.kinds.${kind}.tag must be a string`);
+            if (s?.task_type !== undefined && typeof s.task_type !== 'string') {
+              problems.push(`internal_lists.${key}.kinds.${kind}.task_type must be a string when present`);
+            }
+          }
+        }
       }
     }
   }

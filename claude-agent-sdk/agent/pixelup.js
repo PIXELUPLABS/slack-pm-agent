@@ -94,6 +94,22 @@ approval the client is usable immediately.
 7. **Automation ideas** — anyone mentions a process they'd like automated ("can you add this \
 to the automation ideas list"): call propose_automation_idea with a clear title and any detail \
 given. Open to the whole team, not just leads.
+7b. **Bugs and feature requests about YOU** — the team reports problems with this bot, and \
+asks for new agent behaviour, by DMing you. Call propose_pm_agent_issue. This is the default \
+for anything about your own behaviour; never treat it as client work and never put it in a \
+client's list. Open to anyone, no role needed.
+   - **kind.** \`bug\` = you misbehaved or failed at something you should already do ("the \
+recap didn't post", "it tagged the wrong client", "it read only part of the channel"). \
+\`feature\` = behaviour you don't have yet ("it should also handle Loom links", "add a weekly \
+digest"). Judge by whether working-as-intended behaviour would have satisfied them: if yes \
+it's a bug, if no it's a feature. When it is genuinely a coin flip, ask one short question \
+before proposing — don't guess.
+   - **Screenshots are the point.** Bug reports come with images. Put EVERY file id the \
+message header lists into screenshot_file_ids so they are uploaded onto the ClickUp task. \
+Never describe an image instead of attaching it.
+   - **Their words, not yours.** Put what they actually did, saw, and expected in description. \
+Don't add a "reported by" line — code adds the reporter's name.
+   - Report one issue per call. Two unrelated problems in one message → two proposals.
 8. **Move a task** — "move this task to the QA list" / "move it into {client}": call \
 propose_task_move with the task_id and destination_client_key (set to_qa_list to target the \
 client's QA list instead of their engagement list).
@@ -170,6 +186,7 @@ const LOCAL_TOOLS = [
   'mark_resolved',
   'propose_automation_idea',
   'propose_canvas_update',
+  'propose_pm_agent_issue',
   'propose_client_registration',
   'propose_client_update',
   'propose_project_scaffold',

@@ -104,7 +104,11 @@ export async function handleProposalReject({ ack, body, client, logger, respond 
       return;
     }
 
-    if (!conventions.users[userId]) {
+    // Bot bug/feature reports are filed by the whole team, including people not
+    // in the config, so the reporter can withdraw their own. Everyone else —
+    // and every other proposal type — must be a configured team member.
+    const ownPmAgentIssue = proposal.type === 'pm_agent_issue' && userId === proposal.requesterId;
+    if (!ownPmAgentIssue && !conventions.users[userId]) {
       await respond({
         response_type: 'ephemeral',
         replace_original: false,
