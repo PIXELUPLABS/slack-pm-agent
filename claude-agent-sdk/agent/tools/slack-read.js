@@ -1,6 +1,15 @@
 import { tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 
+import {
+  extractDocxText,
+  extractPdfText,
+  isDocx,
+  isLegacyDoc,
+  isPdf,
+  isTextLike,
+} from '../../integrations/document-reader.js';
+
 /** @param {string} text @returns {{ content: [{ type: 'text', text: string }] }} */
 function asResult(text) {
   return { content: [{ type: 'text', text }] };
@@ -326,24 +335,49 @@ export function createSlackReadTools(deps, conventions) {
 
   const readSharedFile = tool(
     'read_shared_file',
-    'Text content of a file shared in Slack (engagement docs). Text-based files only.',
+    'Read a file shared in Slack (engagement docs, briefs, specs). Handles PDF, Word .docx, and text/markdown ' +
+      '— including scanned PDFs. Returns the document text.',
     { file_id: z.string() },
     async ({ file_id }) => {
       try {
         const info = await deps.client.files.info({ file: file_id });
         const file = /** @type {any} */ (info.file);
         if (!file?.url_private) return asResult('File not accessible.');
-        const isTextLike =
-          /^text\//.test(file.mimetype || '') || ['post', 'markdown', 'quip'].includes(file.filetype || '');
-        if (!isTextLike) {
+
+        const name = file.name || 'file';
+        if (isLegacyDoc(file.mimetype, name)) {
           return asResult(
-            `File "${file.name}" (${file.mimetype}) is not a text file — ask the user to paste the content or share a text/markdown version.`,
+            `"${name}" is a legacy .doc file, which cannot be read directly. Ask for it as .docx or PDF ` +
+              '(in Word: File → Save As), or paste the text.',
           );
         }
+        const pdf = isPdf(file.mimetype, name);
+        const docx = isDocx(file.mimetype, name);
+        if (!pdf && !docx && !isTextLike(file.mimetype, file.filetype)) {
+          return asResult(
+            `"${name}" (${file.mimetype || 'unknown type'}) is not a readable document. Supported: PDF, .docx, ` +
+              'text, and markdown — ask for one of those, or for the content pasted in Slack.',
+          );
+        }
+
         const response = await fetch(file.url_private, {
           headers: { Authorization: `Bearer ${deps.client.token}` },
-          signal: AbortSignal.timeout(15000),
+          // PDFs take longer to pull than a text snippet.
+          signal: AbortSignal.timeout(pdf || docx ? 60000 : 15000),
         });
+        if (!response.ok) return asResult(`Slack returned ${response.status} downloading "${name}".`);
+
+        if (pdf || docx) {
+          const buf = Buffer.from(await response.arrayBuffer());
+          // Slack serves an HTML login page instead of the bytes when the token
+          // lacks files:read — surfaced plainly rather than as a parse error.
+          if (buf.subarray(0, 15).toString('latin1').trimStart().startsWith('<')) {
+            return asResult(`Slack did not return the file bytes for "${name}" — the bot may lack files:read access.`);
+          }
+          const text = pdf ? await extractPdfText(buf, { filename: name }) : extractDocxText(buf);
+          return asResult(`Document: ${name}\n\n${text}`);
+        }
+
         const text = await response.text();
         // Cap what flows into the context — engagement docs rarely need more.
         return asResult(text.slice(0, 20000));

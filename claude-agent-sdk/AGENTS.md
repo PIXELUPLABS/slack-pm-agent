@@ -25,6 +25,9 @@ MCP auth is OAuth (PKCE + dynamic client registration): the `auth:*` scripts wal
 | `CLICKUP_MCP_URL` | Optional override (default `https://mcp.clickup.com/mcp`) |
 | `FIREFLIES_MCP_TOKEN` | Optional static bearer override (skips OAuth for Fireflies) |
 | `FIREFLIES_MCP_URL` | Optional override (default `https://api.fireflies.ai/mcp`) |
+| `TLDV_API_KEY` | Optional; enables `read_link` on tl;dv meeting links (tl;dv → Settings → API keys, Pro/Business plan) |
+| `TLDV_API_URL` | Optional override (default `https://pasta.tldv.io/v1alpha1`) |
+| `DOCUMENT_MODEL` | Optional override for PDF reading (default `claude-sonnet-5`, the agent's pinned model) |
 | `MCP_OAUTH_CALLBACK_PORT` | Localhost callback port for `npm run auth:*` (default 8976) |
 | `SLACK_BOT_TOKEN` | Bot token (`xoxb-`) |
 | `SLACK_APP_TOKEN` | App-level token (`xapp-`) for Socket Mode |
@@ -73,7 +76,7 @@ npm test             # Run all tests
 | `agent/` | `pixelup.js` (agent + system prompt) and `tools/` (tool factories) |
 | `approvals/` | Proposal store, Block Kit card builder, deterministic executor |
 | `config/` | `conventions.json` (non-derivable conventions + per-client overrides), validated loader/helpers, and `resolver.js` (runtime channel↔client and client→ClickUp resolution, memoized) |
-| `integrations/` | MCP server config (`mcp-servers.js`), OAuth provider/token store (`mcp-auth.js`), executor's MCP write client (`clickup-mcp.js`) |
+| `integrations/` | MCP server config (`mcp-servers.js`), OAuth provider/token store (`mcp-auth.js`), executor's MCP write client (`clickup-mcp.js`), document text extraction (`document-reader.js`), tl;dv read client (`tldv.js`) |
 | `scripts/` | `authorize-mcp.js` — one-time interactive OAuth flow (also prints the server's real tool names) |
 | `listeners/` | Bolt listeners: `events/`, `actions/`, `shortcuts/`, `views/` |
 | `schedules/` | Tue/Fri client-update draft scheduler |
@@ -107,6 +110,7 @@ The store uses a `Map` keyed by `${channelId}:${threadTs}` with TTL-based cleanu
 - `propose_project_scaffold` / `propose_client_update` require the `lead` role
 - Approval buttons re-check roles before executing
 - The agent's external MCP allowlist is read-only; `integrations/clickup-mcp.js` implements no delete call
+- `read_link` fetches http(s) only and refuses private/internal addresses — re-checked after redirects, so a public URL cannot redirect into the private range. Everything it and `read_shared_file` return is wrapped as untrusted data, never instructions
 
 ### Tool Definitions
 
