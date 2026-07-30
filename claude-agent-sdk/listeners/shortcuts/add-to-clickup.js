@@ -1,6 +1,8 @@
 import { buildApprovalCard } from '../../approvals/card-builder.js';
+import { endOfWeek } from '../../approvals/scaffold-rules.js';
 import { proposalStore } from '../../approvals/store.js';
-import { findClientByChannel, loadConventions } from '../../config/index.js';
+import { loadConventions } from '../../config/index.js';
+import { resolveChannelContext } from '../../config/resolver.js';
 
 /**
  * "Add to ClickUp" message shortcut — the precision path for task intake.
@@ -21,11 +23,17 @@ export async function handleAddToClickUp({ ack, shortcut, client, logger }) {
     const channelId = shortcut.channel.id;
     const messageText = shortcut.message.text || '';
 
-    // Team members only — enforced in code against config. In client channels
-    // stay completely silent (no ephemeral either); a client-side guest using
-    // the shortcut should see nothing at all.
+    // Which client's channel is this? Resolved live (by channel name) so a new
+    // project works before anyone edits config.
+    const channelCtx = await resolveChannelContext({ client, conventions, channelId });
+    const inClientChannel = channelCtx.kind === 'client-external';
+
+    // Team members only — enforced in code against config. In client-facing
+    // channels stay completely silent (no ephemeral either); a client-side guest
+    // using the shortcut must see nothing at all. Fail closed: an unidentified
+    // channel is treated as client-facing.
     if (!conventions.users[userId]) {
-      if (!findClientByChannel(conventions, channelId)) {
+      if (!inClientChannel && channelCtx.resolved) {
         await client.chat.postEphemeral({
           channel: channelId,
           user: userId,
@@ -35,12 +43,20 @@ export async function handleAddToClickUp({ ack, shortcut, client, logger }) {
       return;
     }
 
-    const match = findClientByChannel(conventions, channelId);
     const clientKeys = Object.keys(conventions.clients);
-    const clientKey = match?.key || (clientKeys.length === 1 ? clientKeys[0] : undefined);
+    const clientKey = channelCtx.clientKey || (clientKeys.length === 1 ? clientKeys[0] : undefined);
 
     const firstLine = messageText.split('\n')[0].trim();
     const title = firstLine.length > 80 ? `${firstLine.slice(0, 77)}…` : firstLine || 'Task from Slack message';
+
+    // Anything the client attached to the message rides along onto the task.
+    const messageFiles = /** @type {any[]} */ (/** @type {any} */ (shortcut.message).files || []);
+    const referenceUrls = messageFiles
+      .map((f) => {
+        const url = f.permalink || f.url_private;
+        return url ? `${f.name || f.title || 'file'}: ${url}` : null;
+      })
+      .filter(Boolean);
 
     const proposal = proposalStore.create({
       type: 'task',
@@ -48,9 +64,13 @@ export async function handleAddToClickUp({ ack, shortcut, client, logger }) {
         clientKey,
         title,
         priority: undefined,
+        // This path can't parse a date out of prose, so the house default
+        // applies: end of the current week. Visible on the card before approval.
+        dueDate: endOfWeek(),
         sourceQuote: messageText,
         sourceChannelId: channelId,
         sourceTs: shortcut.message.ts,
+        ...(referenceUrls.length > 0 && { referenceUrls }),
       },
       requesterId: userId,
       clientKey,

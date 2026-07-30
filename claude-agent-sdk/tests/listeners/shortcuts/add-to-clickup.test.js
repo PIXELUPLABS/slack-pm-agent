@@ -1,10 +1,11 @@
 import assert from 'node:assert';
 import { beforeEach, describe, it, mock } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { handleAddToClickUp } from '../../../listeners/shortcuts/add-to-clickup.js';
 
 // Hermetic: use the test fixture, never the real checked-in conventions.
-process.env.CONVENTIONS_PATH = new URL('../../fixtures/conventions.json', import.meta.url).pathname;
+process.env.CONVENTIONS_PATH = fileURLToPath(new URL('../../fixtures/conventions.json', import.meta.url));
 
 // Slack IDs from the fixture.
 const LEAD_ID = 'U0000000LEAD';

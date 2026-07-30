@@ -57,6 +57,22 @@ describe('applyDueDatePriorities', () => {
   });
 });
 
+describe('endOfWeek', () => {
+  it('resolves to the Friday of the current working week', async () => {
+    const { endOfWeek } = await import('../../approvals/scaffold-rules.js');
+    // 2026-07-17 is a Friday, so Mon 13th → Fri 17th across the week.
+    assert.strictEqual(endOfWeek(new Date('2026-07-13T09:00:00Z')), '2026-07-17'); // Monday
+    assert.strictEqual(endOfWeek(new Date('2026-07-15T23:30:00Z')), '2026-07-17'); // Wednesday
+    assert.strictEqual(endOfWeek(new Date('2026-07-17T08:00:00Z')), '2026-07-17'); // Friday itself
+  });
+
+  it('rolls the weekend forward to the coming Friday', async () => {
+    const { endOfWeek } = await import('../../approvals/scaffold-rules.js');
+    assert.strictEqual(endOfWeek(new Date('2026-07-18T10:00:00Z')), '2026-07-24'); // Saturday
+    assert.strictEqual(endOfWeek(new Date('2026-07-19T10:00:00Z')), '2026-07-24'); // Sunday
+  });
+});
+
 describe('weekend date snapping', () => {
   it('due dates on Sat/Sun snap back to Friday', async () => {
     const { snapDueDateToWeekday } = await import('../../approvals/scaffold-rules.js');

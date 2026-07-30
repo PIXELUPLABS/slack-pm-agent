@@ -5,18 +5,40 @@ import { buildApprovalCard } from '../../approvals/card-builder.js';
 import { buildRegistration } from '../../approvals/registration.js';
 import {
   applyDueDatePriorities,
+  endOfWeek,
   resolveStage,
   snapDueDateToWeekday,
   snapStartDateToWeekday,
 } from '../../approvals/scaffold-rules.js';
 import { proposalStore } from '../../approvals/store.js';
-import { isClientChannel, isKnownPriority, isLead, knownStatuses, resolveStatus } from '../../config/index.js';
+import { isKnownPriority, isLead, knownStatuses, resolveStatus } from '../../config/index.js';
+import { canBotPostInChannel } from '../../config/resolver.js';
 import * as clickupMcp from '../../integrations/clickup-mcp.js';
 import { lookupChannelIdByName, resolveChannelArg } from './slack-read.js';
 
 /** @param {string} text @returns {{ content: [{ type: 'text', text: string }] }} */
 function asResult(text) {
   return { content: [{ type: 'text', text }] };
+}
+
+/**
+ * Keep the references that actually point somewhere. Entries may be bare URLs
+ * or "label: url" as read_channel_messages reports them — both are kept
+ * verbatim (the label is useful on the task); anything without a URL is
+ * dropped, so the model can't turn a description into a fake attachment.
+ * @param {string[] | undefined} urls
+ * @returns {string[] | undefined}
+ */
+function cleanReferences(urls) {
+  const cleaned = [
+    ...new Set(
+      (Array.isArray(urls) ? urls : [])
+        .map((u) => String(u).trim())
+        .filter((u) => /https?:\/\/\S+/i.test(u))
+        .map((u) => u.replace(/^[-•*]\s*/, '')),
+    ),
+  ];
+  return cleaned.length > 0 ? cleaned : undefined;
 }
 
 /**
@@ -39,12 +61,22 @@ export function createProposalTools(deps, conventions) {
   async function postProposal(type, payload, clientKey, targetChannelId) {
     const channel = targetChannelId || deps.channelId;
     // Hard rule: no bot messages in client channels — refuse in code even if
-    // something upstream slipped through.
-    if (isClientChannel(conventions, channel)) {
-      return asResult('Refused: approval cards can never be posted in client channels.');
+    // something upstream slipped through. Resolved by channel name and
+    // fail-closed, so an unmapped or brand-new client channel is still refused.
+    const post = await canBotPostInChannel({ client: deps.client, conventions, channelId: channel });
+    if (!post.allowed) {
+      return asResult(`Refused: approval cards can never be posted in client channels (${post.reason}).`);
     }
+    // Writes need a confirmed client→ClickUp mapping. Reads work on any channel,
+    // but a task has to land in a specific list, so an unregistered client goes
+    // through the one-tap registration card first.
     if (clientKey && !conventions.clients[clientKey]) {
-      return asResult(`Unknown client "${clientKey}". Known: ${Object.keys(conventions.clients).join(', ')}`);
+      return asResult(
+        `"${clientKey}" is not registered yet, so there is no confirmed ClickUp list to write to. ` +
+          'Leads: call propose_client_registration with the client name to get a one-tap registration card ' +
+          '(it resolves their ClickUp folder, lists, and Slack channels automatically). Otherwise ask a lead ' +
+          `to register them. Registered clients: ${Object.keys(conventions.clients).join(', ')}`,
+      );
     }
     const proposal = proposalStore.create({ type, payload, requesterId: deps.userId, clientKey });
     const posted = await deps.client.chat.postMessage({
@@ -62,7 +94,13 @@ export function createProposalTools(deps, conventions) {
     title: z.string().max(120),
     description: z.string().optional(),
     priority: z.string().optional().describe('Priority name from conventions.'),
-    due_date: z.string().optional().describe('YYYY-MM-DD'),
+    due_date: z
+      .string()
+      .optional()
+      .describe(
+        'YYYY-MM-DD. Use the date the client stated in their message, as-is. Omit it when the client named no ' +
+          'date — code then defaults the task to the end of the current week (Friday).',
+      ),
     stage: z
       .string()
       .optional()
@@ -72,11 +110,22 @@ export function createProposalTools(deps, conventions) {
     tags: z.array(z.string()).optional().describe('Tag names that already exist in the ClickUp space.'),
     time_estimate_minutes: z.number().int().positive().optional().describe('Time estimate in minutes.'),
     source_quote: z.string().optional().describe('Verbatim client message this task is based on.'),
+    reference_urls: z
+      .array(z.string())
+      .max(30)
+      .optional()
+      .describe(
+        'EVERY image, file, and link the client shared in reference to this task — copy the Slack file permalinks ' +
+          'and URLs exactly as read_channel_messages reported them (a "label: url" form is fine). They are attached ' +
+          'to the ClickUp task description.',
+      ),
   };
 
   const proposeTask = tool(
     'propose_task',
-    'Propose one ClickUp task for approval. Set stage so the task lands in the right board group. Always include source_quote when the task comes from a client message.',
+    'Propose one ClickUp task for approval. Set stage so the task lands in the right board group. Always include ' +
+      'source_quote when the task comes from a client message, plus reference_urls for every image/file/link the ' +
+      'client attached. Capture major deliverables only — not small tweaks to work the client already briefed.',
     taskSchema,
     ({
       client_key,
@@ -90,6 +139,7 @@ export function createProposalTools(deps, conventions) {
       tags,
       time_estimate_minutes,
       source_quote,
+      reference_urls,
     }) => {
       const resolvedStage = resolveStage(conventions, stage);
       if (stage && !resolvedStage) {
@@ -111,7 +161,9 @@ export function createProposalTools(deps, conventions) {
           title,
           description,
           priority,
-          dueDate: snapDueDateToWeekday(due_date),
+          // Client's stated date wins; with none given, the house rule is the
+          // end of the current week (Friday) rather than an undated task.
+          dueDate: snapDueDateToWeekday(due_date) || endOfWeek(),
           stageName: resolvedStage?.name,
           stageOptionId: resolvedStage?.optionId,
           assigneeSlackIds: assignee_slack_ids,
@@ -120,6 +172,7 @@ export function createProposalTools(deps, conventions) {
           tags,
           timeEstimateMinutes: time_estimate_minutes,
           sourceQuote: source_quote,
+          referenceUrls: cleanReferences(reference_urls),
         },
         client_key,
       );
@@ -399,8 +452,11 @@ export function createProposalTools(deps, conventions) {
       if (!channelId) {
         return asResult(`No channel matching "${channel}" is visible to the bot.`);
       }
-      if (isClientChannel(conventions, channelId)) {
-        return asResult('Refused: the bot never creates or edits canvases in client channels.');
+      const canvasTarget = await canBotPostInChannel({ client: deps.client, conventions, channelId });
+      if (!canvasTarget.allowed) {
+        return asResult(
+          `Refused: the bot never creates or edits canvases in client channels (${canvasTarget.reason}).`,
+        );
       }
       return postProposal('canvas_update', {
         channelId,

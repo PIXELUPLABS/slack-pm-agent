@@ -3,12 +3,13 @@ import { copyFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, beforeEach, describe, it } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { addClientToConventions, loadConventions, resetConventionsCache } from '../../config/index.js';
 
 const tempDir = mkdtempSync(join(tmpdir(), 'conventions-write-'));
 const tempPath = join(tempDir, 'conventions.json');
-const fixturePath = new URL('../fixtures/conventions.json', import.meta.url).pathname;
+const fixturePath = fileURLToPath(new URL('../fixtures/conventions.json', import.meta.url));
 
 after(() => {
   rmSync(tempDir, { recursive: true, force: true });

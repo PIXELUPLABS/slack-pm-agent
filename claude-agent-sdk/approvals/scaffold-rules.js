@@ -44,6 +44,21 @@ export function snapDueDateToWeekday(iso) {
 }
 
 /**
+ * Agency default deadline: the FRIDAY of the current working week. Used when a
+ * client request carries no date of its own — "end of week" is the house
+ * default, so no intake task lands in ClickUp undated. Saturday/Sunday roll
+ * forward to the coming Friday (that work happens next week).
+ * @param {Date} [now] - Injectable for tests.
+ * @returns {string} YYYY-MM-DD
+ */
+export function endOfWeek(now = new Date()) {
+  const iso = now.toISOString().slice(0, 10);
+  const day = new Date(Date.parse(iso)).getUTCDay();
+  const daysToFriday = day === 0 ? 5 : day === 6 ? 6 : 5 - day;
+  return isoShift(iso, daysToFriday);
+}
+
+/**
  * Start dates snap FORWARD to Monday — work doesn't begin on a weekend.
  * @param {string | undefined} iso - YYYY-MM-DD
  * @returns {string | undefined}

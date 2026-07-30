@@ -1,5 +1,6 @@
 import { runPixelupAgent } from '../../agent/index.js';
-import { isConversationChannel, loadConventions } from '../../config/index.js';
+import { loadConventions } from '../../config/index.js';
+import { canBotPostInChannel } from '../../config/resolver.js';
 import { sessionStore } from '../../thread-context/index.js';
 import { buildFeedbackBlocks } from '../views/feedback-builder.js';
 
@@ -66,9 +67,21 @@ export async function handleMessage({ client, context, event, logger, say, saySt
   if (!isProcessableMessage(event)) return;
 
   // Enforced in code: outside DMs the bot converses in any channel it has been
-  // invited to. Configured client channels stay read-only — it reads them via
-  // tools, but no reply, reaction, or card ever lands there.
-  if (event.channel_type !== 'im' && !isConversationChannel(loadConventions(), event.channel)) return;
+  // invited to. Client-facing channels stay read-only — it reads them via
+  // tools, but no reply, reaction, or card ever lands there. Name-based and
+  // fail-closed; see canBotPostInChannel.
+  if (event.channel_type !== 'im') {
+    const post = await canBotPostInChannel({
+      client,
+      conventions: loadConventions(),
+      channelId: event.channel,
+      channelType: event.channel_type,
+    });
+    if (!post.allowed) {
+      logger.info(`Ignored message: ${post.reason}.`);
+      return;
+    }
+  }
 
   // Issue submissions are posted by the bot with metadata so the message
   // handler can run the agent on behalf of the original user.

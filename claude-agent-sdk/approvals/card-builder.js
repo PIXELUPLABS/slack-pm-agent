@@ -33,6 +33,12 @@ function summarizePayload(proposal) {
       if (p.timeEstimateMinutes) lines.push(`*Estimate:* ${p.timeEstimateMinutes} min`);
       if (p.description) lines.push(`*Details:* ${p.description}`);
       if (p.sourceQuote) lines.push(`*Source message:*\n> ${String(p.sourceQuote).split('\n').join('\n> ')}`);
+      if (p.referenceUrls?.length) {
+        // Cards stay scannable; the full list always lands on the task itself.
+        const shown = p.referenceUrls.slice(0, 5).map((/** @type {string} */ r) => `• ${r}`);
+        const rest = p.referenceUrls.length - shown.length;
+        lines.push(`*Client references:*\n${shown.join('\n')}${rest > 0 ? `\n• …and ${rest} more` : ''}`);
+      }
       return lines.join('\n');
     }
     case 'task_update': {

@@ -2,12 +2,12 @@ import {
   addClientToConventions,
   formatTaskName,
   getClickUpUserId,
-  isClientChannel,
   isKnownPriority,
   knownStatuses,
   resolvePriority,
   resolveStatus,
 } from '../config/index.js';
+import { canBotPostInChannel, resolveClientTargets } from '../config/resolver.js';
 import * as clickupDefault from '../integrations/clickup-mcp.js';
 import { resolveStage } from './scaffold-rules.js';
 
@@ -27,14 +27,29 @@ import { resolveStage } from './scaffold-rules.js';
 const UPDATABLE_FIELDS = ['name', 'description', 'priority', 'start_date', 'due_date', 'status', 'stage'];
 
 /**
+ * The client's ClickUp targets at write time. Config values win; any field left
+ * blank or placeholder is resolved from the live ClickUp hierarchy, so a client
+ * whose QA list was created after registration still works without a config
+ * edit. Shaped like ClientConfig so call sites read unchanged.
  * @param {import('../config/index.js').Conventions} conventions
  * @param {string | undefined} clientKey
- * @returns {import('../config/index.js').ClientConfig}
+ * @param {{ getHierarchy: () => Promise<any> } | null} [clickup]
+ * @returns {Promise<{ display_name: string, list_id: string, qa_list_id: string, folder_id: string }>}
  */
-function requireClient(conventions, clientKey) {
-  const client = clientKey ? conventions.clients[clientKey] : undefined;
-  if (!client) throw new Error(`Unknown client "${clientKey}" — check config/conventions.json.`);
-  return client;
+async function requireClient(conventions, clientKey, clickup = null) {
+  const entry = clientKey ? conventions.clients[clientKey] : undefined;
+  if (!entry) throw new Error(`Unknown client "${clientKey}" — check config/conventions.json.`);
+  const targets = await resolveClientTargets({
+    clientKey: /** @type {string} */ (clientKey),
+    conventions,
+    clickup,
+  });
+  return {
+    display_name: entry.display_name,
+    list_id: targets?.listId || '',
+    qa_list_id: targets?.qaListId || '',
+    folder_id: targets?.folderId || '',
+  };
 }
 
 /**
@@ -46,6 +61,19 @@ function parseDueDate(dueDate) {
   const ms = Date.parse(dueDate);
   if (Number.isNaN(ms)) throw new Error(`Invalid due date "${dueDate}" — expected YYYY-MM-DD.`);
   return ms;
+}
+
+/**
+ * The images, files, and links the client shared with the request, rendered as
+ * a Markdown section on the task description so whoever picks the task up has
+ * the references without going back to Slack.
+ * @param {string[] | undefined} refs
+ * @returns {string}
+ */
+export function referenceSection(refs) {
+  const items = (Array.isArray(refs) ? refs : []).map((r) => String(r).trim()).filter(Boolean);
+  if (items.length === 0) return '';
+  return `References shared by the client:\n${items.map((r) => `- ${r}`).join('\n')}`;
 }
 
 /**
@@ -61,7 +89,7 @@ export async function executeProposal(proposal, conventions, clickup = clickupDe
 
   switch (proposal.type) {
     case 'task': {
-      const client = requireClient(conventions, p.clientKey);
+      const client = await requireClient(conventions, p.clientKey, clickup);
       if (!isKnownPriority(conventions, p.priority)) {
         throw new Error(
           `Unknown priority "${p.priority}" — valid: ${Object.keys(conventions.clickup.priorities).join(', ')}.`,
@@ -76,7 +104,11 @@ export async function executeProposal(proposal, conventions, clickup = clickupDe
       const stageFieldId = conventions.clickup.project_stage_field?.id;
       const task = await clickup.createTask(client.list_id, {
         name: formatTaskName(conventions, p.clientKey, p.title),
-        description: [p.description, p.sourceQuote ? `Source (Slack):\n${p.sourceQuote}` : '']
+        description: [
+          p.description,
+          p.sourceQuote ? `Source (Slack):\n${p.sourceQuote}` : '',
+          referenceSection(p.referenceUrls),
+        ]
           .filter(Boolean)
           .join('\n\n'),
         priority: resolvePriority(conventions, p.priority),
@@ -93,14 +125,14 @@ export async function executeProposal(proposal, conventions, clickup = clickupDe
     }
 
     case 'task_move': {
-      const client = requireClient(conventions, p.destClientKey);
+      const client = await requireClient(conventions, p.destClientKey, clickup);
       const toQa = Boolean(p.toQa);
       const listId = toQa ? client.qa_list_id : client.list_id;
       if (!listId) {
         throw new Error(
           toQa
-            ? `${p.destClientKey} has no QA list mapped — set qa_list_id in config/conventions.json.`
-            : `${p.destClientKey} has no engagement list mapped — check config/conventions.json.`,
+            ? `${p.destClientKey} has no QA list — add one with "QA" in the name to their ClickUp folder.`
+            : `${p.destClientKey} has no engagement list — check their ClickUp folder, or set list_id in config/conventions.json.`,
         );
       }
       await clickup.moveTask(p.taskId, listId);
@@ -175,12 +207,12 @@ export async function executeProposal(proposal, conventions, clickup = clickupDe
     }
 
     case 'qa_tasks': {
-      const client = requireClient(conventions, p.clientKey);
+      const client = await requireClient(conventions, p.clientKey, clickup);
       const links = [];
       if (!client.qa_list_id) {
         throw new Error(
-          `${p.clientKey} has no QA list mapped — duplicate "QA Board Demo" into the client's folder in ClickUp, ` +
-            'set qa_list_id in config/conventions.json, restart, and re-propose.',
+          `${p.clientKey} has no QA list — duplicate "QA Board Demo" into the client's ClickUp folder (any list ` +
+            'with "QA" in the name is picked up automatically within 10 minutes), then re-propose.',
         );
       }
       for (const item of p.tasks || []) {
@@ -199,7 +231,7 @@ export async function executeProposal(proposal, conventions, clickup = clickupDe
     }
 
     case 'scaffold': {
-      const client = requireClient(conventions, p.clientKey);
+      const client = await requireClient(conventions, p.clientKey, clickup);
       if (!p.tasks?.length) throw new Error('No tasks in this scaffold proposal.');
       // Client folders are duplicated from the demo template, so the
       // engagement list already exists — populate it, never create lists.
@@ -291,9 +323,13 @@ export async function executeProposal(proposal, conventions, clickup = clickupDe
       if (!slack) throw new Error('Canvas updates require the Slack client (internal error).');
       const channelId = p.channelId;
       // Hard rule: the bot never touches client channels. Guarded at propose
-      // time too, but re-checked here in code.
-      if (isClientChannel(conventions, channelId)) {
-        throw new Error('Refused: the bot never creates or edits canvases in client channels.');
+      // time too, but re-checked here in code — by channel name, fail-closed,
+      // so an unmapped client channel is refused rather than waved through.
+      const canvasTarget = await canBotPostInChannel({ client: slack, conventions, channelId });
+      if (!canvasTarget.allowed) {
+        throw new Error(
+          `Refused: the bot never creates or edits canvases in client channels (${canvasTarget.reason}).`,
+        );
       }
       const mode = p.mode || 'replace';
       const documentContent = { type: /** @type {'markdown'} */ ('markdown'), markdown: p.markdown };

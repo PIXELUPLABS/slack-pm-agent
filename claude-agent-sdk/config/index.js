@@ -1,5 +1,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 
+import { isPlaceholderId, resetResolverCache } from './resolver.js';
+
 /**
  * @typedef {Object} ClientConfig
  * @property {string} display_name
@@ -211,17 +213,25 @@ export function addClientToConventions(clientKey, entry, options = {}) {
   const validated = validateConventions(data);
   writeFileSync(path, `${JSON.stringify(validated, null, 2)}\n`);
   resetConventionsCache();
+  // Drop memoized lookups too — a newly registered client's overrides must take
+  // effect immediately, not after the resolver TTL expires.
+  resetResolverCache();
   return loadConventions();
 }
 
 /**
+ * Config-only channel→client lookup. Ignores unfilled placeholder IDs
+ * (`C_TODO_ACME`), which would otherwise "match" nothing while looking like a
+ * real mapping. Callers that need live resolution by channel NAME should use
+ * `resolveChannelContext` from ./resolver.js instead.
  * @param {Conventions} conventions
  * @param {string} channelId
  * @returns {{ key: string, client: ClientConfig } | null}
  */
 export function findClientByChannel(conventions, channelId) {
+  if (!channelId) return null;
   for (const [key, client] of Object.entries(conventions.clients)) {
-    if (client.channel_id === channelId) return { key, client };
+    if (!isPlaceholderId(client.channel_id) && client.channel_id === channelId) return { key, client };
   }
   return null;
 }
@@ -236,12 +246,14 @@ export function isClientChannel(conventions, channelId) {
 }
 
 /**
- * Channels the bot is allowed to CONVERSE in (beyond DMs): any channel it has
- * been invited to — Slack only delivers channel events for channels the bot is
- * a member of, so receiving the event IS the membership signal. The sole
- * exception is configured client channels, which stay read-only silence: the
- * bot reads them via tools but never posts, reacts, or renders a card there —
- * the client sees nothing, ever (hard rule).
+ * Config-only view of "may converse here": any channel that is not a CONFIGURED
+ * client channel.
+ *
+ * NOT THE GUARD. It answers `true` for channels config has never heard of,
+ * which is exactly how a client channel with an unfilled `channel_id` came to
+ * be treated as a normal internal channel. Listeners must use
+ * `canBotPostInChannel` from ./resolver.js, which decides by channel name and
+ * fails closed on an unidentifiable channel.
  * @param {Conventions} conventions
  * @param {string} channelId
  * @returns {boolean}

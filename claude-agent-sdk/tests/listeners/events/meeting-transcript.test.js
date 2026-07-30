@@ -1,8 +1,9 @@
 import assert from 'node:assert';
 import { beforeEach, describe, it, mock } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 // Hermetic: use the test fixture, never the real checked-in conventions.
-process.env.CONVENTIONS_PATH = new URL('../../fixtures/conventions.json', import.meta.url).pathname;
+process.env.CONVENTIONS_PATH = fileURLToPath(new URL('../../fixtures/conventions.json', import.meta.url));
 
 import { resetConventionsCache } from '../../../config/index.js';
 import {

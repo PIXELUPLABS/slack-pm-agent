@@ -1,6 +1,7 @@
 import { createSdkMcpServer, query, tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 
+import { endOfWeek } from '../approvals/scaffold-rules.js';
 import { conventionsSummary, loadConventions } from '../config/index.js';
 import { agentServerConfig, CLICKUP_MCP, FIREFLIES_MCP } from '../integrations/mcp-servers.js';
 import { createProposalTools, createSlackReadTools } from './tools/index.js';
@@ -31,13 +32,33 @@ include: ["custom_fields"], and clickup_filter_tasks can neither filter by them 
 them. To see stages across a list, get_task the specific tasks you care about.
 
 ## WORKFLOWS
-1. **Client task intake** — user asks to capture a client request: read the client channel \
-to find the message, then propose_task with title, priority, due date, stage, and the \
-verbatim quote. Always set stage (planning, visual design, content, dev, or qa) — it is the \
-board group the task lands in; infer it from the task type (design work → visual design, \
-implementation → dev, copy → content). Optional on propose_task: assignee_slack_ids (one or \
-more people), parent_task_id (makes it a subtask), tags (must already exist in the space), and \
-time_estimate_minutes.
+1. **Client task intake** — user asks to capture what a client shared: read the client channel \
+to find the messages, then propose_task per task with title, priority, due date, stage, the \
+verbatim quote, and the client's references. Always set stage (planning, visual design, \
+content, dev, or qa) — it is the board group the task lands in; infer it from the task type \
+(design work → visual design, implementation → dev, copy → content). Optional on propose_task: \
+assignee_slack_ids (one or more people), parent_task_id (makes it a subtask), tags (must \
+already exist in the space), and time_estimate_minutes. Four intake rules, always:
+   - **Read as much as asked.** read_channel_messages paginates — it is NOT capped at 30 \
+messages. "Go through the channel" / "go through everything" → entire_channel: true. \
+"This week", "since Monday", "last month" → since_date (and until_date). A specific count → \
+limit. Never sample a slice of a channel you were told to go through, and never claim you \
+read it all when the tool reported messages left unread.
+   - **Carry the client's references.** Put EVERY image, file, and link the client shared in \
+reference to the task into reference_urls — the file permalinks and URLs exactly as \
+read_channel_messages reported them (its \`[attached: …]\` notes), including ones in the \
+message's thread replies. Copy them verbatim; never invent or reconstruct a URL.
+   - **Major deliverables only.** Capture substantial work: a new asset, screen, page, brand \
+element, a distinct design/dev/content deliverable. Do NOT create a task — and never a \
+subtask — for a small follow-up that refers back to a bigger design task the client already \
+briefed (revisions, tweaks, "make the logo bigger", "shift that section up", approvals, \
+feedback on a shared deliverable). Fold those into the existing task with \
+propose_task_update (append to its description), or just list them in your reply. \
+parent_task_id is for genuine breakdowns of new scope, not for client feedback.
+   - **Dates as stated.** If the client's message names a date or deadline ("by Tuesday", \
+"before the 5th", "next Friday"), set due_date to that exact date, resolved against today's \
+date from the message header. If no date is mentioned, OMIT due_date — code defaults it to \
+the end of the current week (Friday). Never guess a deadline in between.
 2. **Client onboarding** — user shares an engagement doc: read it (read_shared_file), \
 cross-check the Fireflies kickoff transcript for verbal agreements the doc misses, read the \
 client's existing engagement list (it is duplicated from the demo template and may already \
@@ -70,8 +91,10 @@ never a client channel), markdown content, and mode (replace to set the whole ca
 prepend to add). Creating and editing are handled automatically.
 
 ## TEAM CONVENTIONS
-- Every user message is prefixed with "[From <@SLACK_ID>]" — that is the requester. Resolve \
-who they are (name, role, ClickUp ID) from the Team list below; never ask who is asking.
+- Every user message carries a header: "[Today: <date> · this week ends <friday>]" then \
+"[From <@SLACK_ID>]". Use that date for all relative dates ("Tuesday", "next week") — never \
+guess today's date. The requester is the Slack ID; resolve who they are (name, role, ClickUp \
+ID) from the Team list below and never ask who is asking.
 - Slack channels per client: "{key}-pixelup" is the EXTERNAL client channel (never post \
 there); "{key}-internal" is the internal one.
 - Weeks run Monday–Friday: "end of week N" always means that week's FRIDAY. Never put a \
@@ -186,10 +209,15 @@ function buildAllowedTools() {
   ];
 }
 
-// Bound the agentic loop so a runaway conversation can't burn tokens.
-const MAX_TURNS = 16;
+// Bound the agentic loop so a runaway conversation can't burn tokens. Sized for
+// the heaviest legitimate run: sweep a whole client channel, then post one
+// approval card per captured task.
+const MAX_TURNS = 30;
 
 const SLACK_MCP_URL = 'https://mcp.slack.com/mcp';
+
+/** Weekday names for the date header (UTC day index). */
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
 /**
  * @typedef {Object} PixelupDeps
@@ -318,9 +346,13 @@ export async function runPixelupAgent(text, sessionId = undefined, deps = undefi
     ...(sessionId && { resume: sessionId }),
   };
 
-  // Identify the requester to the model. This rides on the user message (never
-  // the system prompt, which must stay byte-stable for prompt caching).
-  const promptText = deps?.userId ? `[From <@${deps.userId}>]\n${text}` : text;
+  // Today's date and the requester ride on the USER message, never the system
+  // prompt (which must stay byte-stable for prompt caching). Without the date
+  // the model cannot resolve "by Tuesday" in a client request, and end-of-week
+  // defaults would be guesswork.
+  const now = new Date();
+  const dateHeader = `[Today: ${now.toISOString().slice(0, 10)} (${DAY_NAMES[now.getUTCDay()]}) · this week ends ${endOfWeek(now)} (Friday)]`;
+  const promptText = [dateHeader, deps?.userId ? `[From <@${deps.userId}>]` : '', text].filter(Boolean).join('\n');
 
   const responseParts = [];
   let newSessionId = null;

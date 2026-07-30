@@ -6,18 +6,151 @@ function asResult(text) {
   return { content: [{ type: 'text', text }] };
 }
 
-/** @param {any[]} messages @returns {string} */
-function compactMessages(messages) {
-  return messages
-    .filter((m) => m.type === 'message' && (m.text || m.files?.length))
+/** Slack's per-request page size for history/replies. Reads paginate over this. */
+const HISTORY_PAGE_SIZE = 200;
+/** Messages returned when the caller doesn't say how many they want. */
+const DEFAULT_HISTORY_LIMIT = 15;
+/**
+ * Ceiling on ONE read. Not a product cap — "the whole channel" is a supported
+ * request — just a backstop so a runaway sweep can't paginate forever.
+ */
+const MAX_HISTORY_MESSAGES = 5000;
+/**
+ * Character budget for the text handed back to the model. Messages beyond it
+ * are dropped OLDEST-first and the omission is reported, so the model knows to
+ * narrow the range instead of silently reasoning over a partial channel.
+ */
+const MAX_HISTORY_CHARS = 60000;
+
+/**
+ * Everything the client attached to a message: Slack file permalinks and the
+ * URLs behind link previews. Task intake carries these onto the ClickUp task,
+ * so they must survive the compaction.
+ * @param {any} m
+ * @returns {string[]}
+ */
+function messageReferences(m) {
+  /** @type {string[]} */
+  const refs = [];
+  for (const f of m.files || []) {
+    const url = f.permalink || f.url_private;
+    const label = f.name || f.title || f.filetype || 'file';
+    refs.push(url ? `${label}: ${url} (id: ${f.id})` : `${label} (id: ${f.id})`);
+  }
+  for (const a of m.attachments || []) {
+    const url = a.title_link || a.original_url || a.app_unfurl_url || a.image_url;
+    if (url) refs.push(`${a.title || a.service_name || 'link'}: ${url}`);
+  }
+  return refs;
+}
+
+/**
+ * Render messages as compact chronological lines (oldest → newest, the order
+ * someone reading the channel would see) within the character budget.
+ * @param {any[]} messages
+ * @param {{ maxChars?: number }} [options]
+ * @returns {string}
+ */
+export function compactMessages(messages, options = {}) {
+  const lines = messages
+    .filter((m) => m.type === 'message' && (m.text || m.files?.length || m.attachments?.length))
+    .slice()
+    .sort((a, b) => Number(a.ts) - Number(b.ts))
     .map((m) => {
       const who = m.user ? `<@${m.user}>` : m.username || 'bot';
-      const fileNote = m.files?.length
-        ? ` [files: ${m.files.map((/** @type {any} */ f) => `${f.name} (id: ${f.id})`).join(', ')}]`
-        : '';
-      return `[ts:${m.ts}] ${who}: ${m.text || ''}${fileNote}`;
-    })
-    .join('\n');
+      const refs = messageReferences(m);
+      const refNote = refs.length ? ` [attached: ${refs.join(' | ')}]` : '';
+      const threadNote = m.reply_count ? ` [thread: ${m.reply_count} repl${m.reply_count === 1 ? 'y' : 'ies'}]` : '';
+      return `[ts:${m.ts}] ${who}: ${m.text || ''}${refNote}${threadNote}`;
+    });
+
+  const maxChars = options.maxChars ?? MAX_HISTORY_CHARS;
+  const joined = lines.join('\n');
+  if (joined.length <= maxChars) return joined;
+
+  // Over budget: keep the newest messages that fit and say what was dropped.
+  /** @type {string[]} */
+  const kept = [];
+  let size = 0;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    size += lines[i].length + 1;
+    if (size > maxChars && kept.length > 0) break;
+    kept.unshift(lines[i]);
+  }
+  const dropped = lines.length - kept.length;
+  return (
+    `[${dropped} older message(s) omitted — this read hit the size cap. Re-read with since_date/until_date ` +
+    `to cover the earlier part of the channel.]\n${kept.join('\n')}`
+  );
+}
+
+/**
+ * YYYY-MM-DD → Slack's epoch-seconds timestamp filter.
+ * @param {string | undefined} date
+ * @returns {string | undefined}
+ */
+function toSlackTs(date) {
+  if (!date) return undefined;
+  const ms = Date.parse(date);
+  if (Number.isNaN(ms)) return undefined;
+  return String(Math.floor(ms / 1000));
+}
+
+/**
+ * Paginated channel history. Slack returns at most ~200 messages per request,
+ * so anything larger — up to the entire channel — is assembled here over
+ * cursors rather than being capped at one page.
+ * @param {import('@slack/web-api').WebClient} client
+ * @param {string} channelId
+ * @param {{ limit?: number, sinceDate?: string, untilDate?: string }} [options]
+ * @returns {Promise<{ messages: any[], hasMore: boolean }>} hasMore: messages
+ * older than the ones returned still exist in the requested range.
+ */
+export async function fetchChannelHistory(client, channelId, options = {}) {
+  const target = Math.min(options.limit || DEFAULT_HISTORY_LIMIT, MAX_HISTORY_MESSAGES);
+  const oldest = toSlackTs(options.sinceDate);
+  const latest = toSlackTs(options.untilDate);
+  /** @type {any[]} */
+  const messages = [];
+  /** @type {string | undefined} */
+  let cursor;
+  do {
+    const res = await client.conversations.history({
+      channel: channelId,
+      limit: Math.min(HISTORY_PAGE_SIZE, target - messages.length),
+      ...(cursor && { cursor }),
+      ...(oldest && { oldest }),
+      ...(latest && { latest }),
+    });
+    messages.push(...(res.messages || []));
+    cursor = res.has_more ? res.response_metadata?.next_cursor || undefined : undefined;
+  } while (cursor && messages.length < target);
+  return { messages: messages.slice(0, target), hasMore: Boolean(cursor) };
+}
+
+/**
+ * All replies in a thread, paginated — long QA threads run past one page.
+ * @param {import('@slack/web-api').WebClient} client
+ * @param {string} channelId
+ * @param {string} threadTs
+ * @returns {Promise<any[]>}
+ */
+export async function fetchThreadReplies(client, channelId, threadTs) {
+  /** @type {any[]} */
+  const messages = [];
+  /** @type {string | undefined} */
+  let cursor;
+  do {
+    const res = await client.conversations.replies({
+      channel: channelId,
+      ts: threadTs,
+      limit: HISTORY_PAGE_SIZE,
+      ...(cursor && { cursor }),
+    });
+    messages.push(...(res.messages || []));
+    cursor = res.has_more ? res.response_metadata?.next_cursor || undefined : undefined;
+  } while (cursor && messages.length < MAX_HISTORY_MESSAGES);
+  return messages;
 }
 
 /** @param {string | undefined} value @returns {boolean} Real Slack channel ID (not a C_TODO_* placeholder). */
@@ -111,13 +244,26 @@ export async function lookupChannelIdByName(client, name) {
 export function createSlackReadTools(deps, conventions) {
   const readChannelMessages = tool(
     'read_channel_messages',
-    'Recent messages from any channel the bot is in. Accepts a client key (external client channel), ' +
-      'a channel name (e.g. "monumint-internal"), or a raw channel ID. Read-only.',
+    'Messages from any channel the bot is in — reads paginate, so the whole channel is available, not just one page. ' +
+      'Accepts a client key (external client channel), a channel name (e.g. "monumint-internal"), or a raw channel ID. ' +
+      'Set entire_channel: true to sweep the full history, or pass a larger limit / a date range. Read-only.',
     {
       channel: z.string().describe('Client key, channel name, or Slack channel ID.'),
-      limit: z.number().int().min(1).max(30).optional().describe('Default 15.'),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(MAX_HISTORY_MESSAGES)
+        .optional()
+        .describe(`How many of the most recent messages to read. Default ${DEFAULT_HISTORY_LIMIT}.`),
+      entire_channel: z
+        .boolean()
+        .optional()
+        .describe(`Read the whole channel history (up to ${MAX_HISTORY_MESSAGES} messages). Overrides limit.`),
+      since_date: z.string().optional().describe('Only messages on/after this date (YYYY-MM-DD).'),
+      until_date: z.string().optional().describe('Only messages on/before this date (YYYY-MM-DD).'),
     },
-    async ({ channel, limit }) => {
+    async ({ channel, limit, entire_channel, since_date, until_date }) => {
       try {
         const resolved = resolveChannelArg(conventions, channel);
         let channelId = resolved.id;
@@ -130,9 +276,23 @@ export function createSlackReadTools(deps, conventions) {
               'the bot to be invited (/invite it there). Double-check the exact channel name with the user.',
           );
         }
-        const result = await deps.client.conversations.history({ channel: channelId, limit: limit || 15 });
-        const text = compactMessages(result.messages || []);
-        return asResult(text || 'No messages found.');
+        // A date range on its own means "everything in that range" — nobody
+        // asking for a month of history wants the default 15.
+        const wantsAll = entire_channel || (!limit && Boolean(since_date || until_date));
+        const { messages, hasMore } = await fetchChannelHistory(deps.client, channelId, {
+          limit: wantsAll ? MAX_HISTORY_MESSAGES : limit,
+          sinceDate: since_date,
+          untilDate: until_date,
+        });
+        const body = compactMessages(messages);
+        if (!body) return asResult('No messages found.');
+        // Only a full sweep that still ran out of room is a warning; a bounded
+        // read leaving older messages behind is exactly what was asked for.
+        const ceilingNote =
+          wantsAll && hasMore
+            ? ` — stopped at the ${MAX_HISTORY_MESSAGES}-message ceiling, older messages remain unread`
+            : '';
+        return asResult(`${messages.length} message(s), oldest first${ceilingNote}:\n${body}`);
       } catch (e) {
         const err = /** @type {any} */ (e);
         const hint = err.data?.error === 'not_in_channel' ? ' (the bot must be invited to the channel first)' : '';
@@ -143,19 +303,19 @@ export function createSlackReadTools(deps, conventions) {
 
   const readThread = tool(
     'read_slack_thread',
-    'All replies in a thread. Defaults to the current thread. Read-only.',
+    'All replies in a thread, paginated to the end of the thread. Defaults to the current thread. Read-only.',
     {
       channel_id: z.string().optional(),
       thread_ts: z.string().optional(),
     },
     async ({ channel_id, thread_ts }) => {
       try {
-        const result = await deps.client.conversations.replies({
-          channel: channel_id || deps.channelId,
-          ts: thread_ts || deps.threadTs,
-          limit: 100,
-        });
-        const text = compactMessages(result.messages || []);
+        const messages = await fetchThreadReplies(
+          deps.client,
+          channel_id || deps.channelId,
+          thread_ts || deps.threadTs,
+        );
+        const text = compactMessages(messages);
         return asResult(text || 'No messages found.');
       } catch (e) {
         const err = /** @type {any} */ (e);

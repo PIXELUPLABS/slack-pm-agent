@@ -40,13 +40,21 @@ function proposal(overrides) {
   });
 }
 
-/** @param {{ existingCanvasId?: string | null }} [opts] Minimal Slack Web API fake for canvas tests. */
-function fakeSlack({ existingCanvasId = null } = {}) {
+/**
+ * Minimal Slack Web API fake for canvas tests. `name` matters: the client-channel
+ * guard classifies by channel name and fails closed, so a nameless channel is
+ * refused (see the dedicated test below).
+ * @param {{ existingCanvasId?: string | null, name?: string }} [opts]
+ */
+function fakeSlack({ existingCanvasId = null, name = 'pixelup-team' } = {}) {
   return {
     conversations: {
       info: mock.fn(async () => ({
         ok: true,
-        channel: existingCanvasId ? { properties: { canvas: { file_id: existingCanvasId } } } : { properties: {} },
+        channel: {
+          name,
+          properties: existingCanvasId ? { canvas: { file_id: existingCanvasId } } : {},
+        },
       })),
       canvases: {
         create: mock.fn(async () => ({ ok: true, canvas_id: 'NEWCANVAS' })),
@@ -100,6 +108,30 @@ describe('executeProposal', () => {
     assert.ok(result.summary.includes('https://cu/t1'));
   });
 
+  it('task: attaches the client references to the description', async () => {
+    const p = proposal({
+      type: 'task',
+      payload: {
+        clientKey: 'acme',
+        title: 'New landing page hero',
+        sourceQuote: 'here is the reference',
+        referenceUrls: ['hero-ref.png: https://files.slack.com/hero-ref.png', 'https://dribbble.com/shots/123'],
+      },
+    });
+    await executeProposal(p, conventions(), fakeClickUp);
+    const [, fields] = fakeClickUp.createTask.mock.calls[0].arguments;
+    assert.ok(fields.description.includes('References shared by the client:'));
+    assert.ok(fields.description.includes('- hero-ref.png: https://files.slack.com/hero-ref.png'));
+    assert.ok(fields.description.includes('- https://dribbble.com/shots/123'));
+  });
+
+  it('task: omits the references section when the client shared nothing', async () => {
+    const p = proposal({ type: 'task', payload: { clientKey: 'acme', title: 'Logo concepts' } });
+    await executeProposal(p, conventions(), fakeClickUp);
+    const [, fields] = fakeClickUp.createTask.mock.calls[0].arguments;
+    assert.ok(!fields.description.includes('References shared by the client'));
+  });
+
   it('task: rejects unknown clients', async () => {
     const p = proposal({ type: 'task', payload: { clientKey: 'ghost', title: 'x' } });
     await assert.rejects(() => executeProposal(p, conventions(), fakeClickUp), /Unknown client "ghost"/);
@@ -144,7 +176,7 @@ describe('executeProposal', () => {
     const conv = conventions();
     conv.clients.acme.qa_list_id = undefined;
     const p = proposal({ type: 'task_move', payload: { taskId: 't9', destClientKey: 'acme', toQa: true } });
-    await assert.rejects(() => executeProposal(p, conv, fakeClickUp), /no QA list mapped/);
+    await assert.rejects(() => executeProposal(p, conv, fakeClickUp), /no QA list/);
   });
 
   it('task_move: rejects an unknown destination client', async () => {

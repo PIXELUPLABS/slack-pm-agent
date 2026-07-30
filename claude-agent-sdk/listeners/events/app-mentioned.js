@@ -1,5 +1,6 @@
 import { runPixelupAgent } from '../../agent/index.js';
-import { isConversationChannel, loadConventions } from '../../config/index.js';
+import { loadConventions } from '../../config/index.js';
+import { canBotPostInChannel } from '../../config/resolver.js';
 import { sessionStore } from '../../thread-context/index.js';
 import { buildFeedbackBlocks } from '../views/feedback-builder.js';
 
@@ -13,10 +14,18 @@ export async function handleAppMentioned({ client, context, event, logger, say, 
     const channelId = event.channel;
 
     // Enforced in code: the bot converses in DMs and any channel it has been
-    // invited to. The one exception is configured client channels — read-only
-    // silence, even when @mentioned, so the client never sees the bot.
-    if (!isConversationChannel(loadConventions(), channelId)) {
-      logger.info(`Ignored app_mention in ${channelId} — configured client channel; the bot stays silent.`);
+    // invited to. Client-facing channels are read-only silence, even when
+    // @mentioned, so the client never sees the bot. Decided by channel NAME
+    // (`{client}-pixelup`), not by a config ID that can be missing or stale,
+    // and fail-closed when the channel can't be identified.
+    const post = await canBotPostInChannel({
+      client,
+      conventions: loadConventions(),
+      channelId,
+      channelType: /** @type {any} */ (event).channel_type,
+    });
+    if (!post.allowed) {
+      logger.info(`Ignored app_mention: ${post.reason}.`);
       return;
     }
 

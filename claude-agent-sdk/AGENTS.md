@@ -72,7 +72,7 @@ npm test             # Run all tests
 |-----------|---------|
 | `agent/` | `pixelup.js` (agent + system prompt) and `tools/` (tool factories) |
 | `approvals/` | Proposal store, Block Kit card builder, deterministic executor |
-| `config/` | `conventions.json` (single source of truth) + validated loader/helpers |
+| `config/` | `conventions.json` (non-derivable conventions + per-client overrides), validated loader/helpers, and `resolver.js` (runtime channel↔client and client→ClickUp resolution, memoized) |
 | `integrations/` | MCP server config (`mcp-servers.js`), OAuth provider/token store (`mcp-auth.js`), executor's MCP write client (`clickup-mcp.js`) |
 | `scripts/` | `authorize-mcp.js` — one-time interactive OAuth flow (also prints the server's real tool names) |
 | `listeners/` | Bolt listeners: `events/`, `actions/`, `shortcuts/`, `views/` |
@@ -102,7 +102,8 @@ The store uses a `Map` keyed by `${channelId}:${threadTs}` with TTL-based cleanu
 
 ### Permission & safety gates (in code, never in the prompt)
 
-- `listeners/events/*` drop any event in a configured client channel — the bot never posts there
+- `listeners/events/*` drop any event in a client-facing channel — the bot never posts there. The check is `canBotPostInChannel` (`config/resolver.js`): by channel name (`{client}-pixelup`), not by config ID, and fail-closed on an unidentifiable channel. Requires `channels:read`/`groups:read`
+- Writes need a registered client: `propose_*` refuses an unknown client key and points at `propose_client_registration` (lead-only)
 - `propose_project_scaffold` / `propose_client_update` require the `lead` role
 - Approval buttons re-check roles before executing
 - The agent's external MCP allowlist is read-only; `integrations/clickup-mcp.js` implements no delete call
