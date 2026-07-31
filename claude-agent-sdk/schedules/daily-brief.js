@@ -267,12 +267,12 @@ function annotateReply(reply, parent) {
 }
 
 /**
- * Thread replies that landed inside the window, for every thread this channel
- * saw activity on.
+ * Threads this channel saw activity on, returned RAW (untruncated, un-annotated)
+ * so mention detection reads the author's real words.
  *
  * Two cases, both real and both previously invisible:
  *  - A question asked in the window and ANSWERED in its thread. Without this the
- *    brief reports it as unanswered and tells the founder they're blocking work
+ *    brief reports it as unanswered and tells the reader they're blocking work
  *    that is already moving — the worst kind of wrong.
  *  - A thread whose parent is OLDER than the window but which got replies inside
  *    it (QA rounds run for days). `conversations.history` keys off the parent's
@@ -280,7 +280,7 @@ function annotateReply(reply, parent) {
  *    parent's `latest_reply`, which is why the scan window is wider than the
  *    brief window.
  * @param {{ client: import('@slack/web-api').WebClient, channelId: string, parents: any[], sinceTs: number, untilTs: number }} args
- * @returns {Promise<{ replies: any[], threadsExpanded: number, threadsSkipped: number }>}
+ * @returns {Promise<{ threads: Array<{ parent: any, replies: any[] }>, threadsExpanded: number, threadsSkipped: number }>}
  */
 async function fetchWindowReplies({ client, channelId, parents, sinceTs, untilTs }) {
   const candidates = parents
@@ -288,8 +288,8 @@ async function fetchWindowReplies({ client, channelId, parents, sinceTs, untilTs
     .sort((a, b) => Number(b.latest_reply || 0) - Number(a.latest_reply || 0));
 
   const expand = candidates.slice(0, MAX_THREADS_PER_CHANNEL);
-  /** @type {any[]} */
-  const replies = [];
+  /** @type {Array<{ parent: any, replies: any[] }>} */
+  const threads = [];
   let threadsExpanded = 0;
 
   for (const parent of expand) {
@@ -302,14 +302,65 @@ async function fetchWindowReplies({ client, channelId, parents, sinceTs, untilTs
         const ts = Number(r.ts);
         return ts >= sinceTs && ts <= untilTs;
       })
-      .filter(isSubstantiveMessage)
-      .slice(-MAX_REPLIES_PER_THREAD)
-      .map((r) => annotateReply(r, parent));
+      .filter(isSubstantiveMessage);
     if (inWindow.length) threadsExpanded++;
-    replies.push(...inWindow);
+    threads.push({ parent, replies: inWindow });
   }
 
-  return { replies, threadsExpanded, threadsSkipped: candidates.length - expand.length };
+  return { threads, threadsExpanded, threadsSkipped: candidates.length - expand.length };
+}
+
+/**
+ * Messages in this channel that tag the brief's recipient, and whether the
+ * recipient has already answered in that thread.
+ *
+ * This is the whole basis of the "Needs you" section, and it lives in code on
+ * purpose. Left to the model, that section drifted run to run on identical data
+ * — because the prompt never said WHICH person "you" was, so the model inferred
+ * it from whichever ID appeared most. An `<@U…>` match against the recipient's
+ * real ID cannot drift.
+ *
+ * `answered` is what keeps a resolved ask from being re-raised: if the recipient
+ * posted in the same thread after being tagged, the ball is no longer with them.
+ * @param {{ recipientId: string, channelName: string, topLevel: any[], threads: Array<{ parent: any, replies: any[] }> }} args
+ * @returns {Array<{ channel: string, author: string, ts: string, text: string, answered: boolean }>}
+ */
+export function findDirectMentions({ recipientId, channelName, topLevel, threads }) {
+  if (!recipientId) return [];
+  const tag = `<@${recipientId}>`;
+
+  // thread_ts → every in-window message in that thread, for the "did they reply" check.
+  /** @type {Map<string, any[]>} */
+  const byThread = new Map();
+  for (const t of threads) {
+    byThread.set(t.parent.thread_ts || t.parent.ts, [t.parent, ...t.replies]);
+  }
+
+  const everyMessage = [...topLevel, ...threads.flatMap((t) => t.replies)];
+  /** @type {Array<{ channel: string, author: string, ts: string, text: string, answered: boolean }>} */
+  const found = [];
+  const seenTs = new Set();
+
+  for (const m of everyMessage) {
+    if (seenTs.has(m.ts)) continue;
+    if (!(m.text || '').includes(tag)) continue;
+    // A message the recipient wrote themselves is not someone waiting on them.
+    if (m.user === recipientId) continue;
+    seenTs.add(m.ts);
+
+    const threadKey = m.thread_ts || m.ts;
+    const siblings = byThread.get(threadKey) || [];
+    const answered = siblings.some((r) => r.user === recipientId && Number(r.ts) > Number(m.ts));
+
+    found.push({
+      channel: channelName,
+      author: m.user ? `<@${m.user}>` : m.username || 'bot',
+      ts: m.ts,
+      text: (m.text || '').replace(/\s+/g, ' ').slice(0, 300),
+      answered,
+    });
+  }
+  return found.sort((a, b) => Number(a.ts) - Number(b.ts));
 }
 
 /**
@@ -319,16 +370,18 @@ async function fetchWindowReplies({ client, channelId, parents, sinceTs, untilTs
  * The history read spans `scanHours` (wider than the brief window) so threads
  * with old parents and fresh replies are found; only messages and replies whose
  * own timestamp falls inside the brief window are ever briefed on.
- * @param {{ client: import('@slack/web-api').WebClient, channels: BriefChannel[], since: string, until?: string, scanHours?: number }} args
- * @returns {Promise<{ active: Array<BriefChannel & { messageCount: number, text: string, threadsExpanded: number }>, quiet: BriefChannel[], unreadable: Array<BriefChannel & { error: string }> }>}
+ * @param {{ client: import('@slack/web-api').WebClient, channels: BriefChannel[], since: string, until?: string, scanHours?: number, recipientId?: string }} args
+ * @returns {Promise<{ active: Array<BriefChannel & { messageCount: number, text: string, threadsExpanded: number }>, quiet: BriefChannel[], unreadable: Array<BriefChannel & { error: string }>, mentions: Array<{ channel: string, author: string, ts: string, text: string, answered: boolean }> }>}
  */
-export async function gatherChannelActivity({ client, channels, since, until, scanHours }) {
+export async function gatherChannelActivity({ client, channels, since, until, scanHours, recipientId }) {
   /** @type {Array<BriefChannel & { messageCount: number, text: string, threadsExpanded: number }>} */
   const active = [];
   /** @type {BriefChannel[]} */
   const quiet = [];
   /** @type {Array<BriefChannel & { error: string }>} */
   const unreadable = [];
+  /** @type {Array<{ channel: string, author: string, ts: string, text: string, answered: boolean }>} */
+  const mentions = [];
 
   const sinceTs = toEpochSeconds(since);
   const untilTs = until ? toEpochSeconds(until) : Number.MAX_SAFE_INTEGER;
@@ -349,7 +402,7 @@ export async function gatherChannelActivity({ client, channels, since, until, sc
       });
 
       const topLevel = messages.filter((m) => Number(m.ts) >= sinceTs).filter(isSubstantiveMessage);
-      const { replies, threadsExpanded, threadsSkipped } = await fetchWindowReplies({
+      const { threads, threadsExpanded, threadsSkipped } = await fetchWindowReplies({
         client,
         channelId: ch.id,
         parents: messages,
@@ -357,7 +410,15 @@ export async function gatherChannelActivity({ client, channels, since, until, sc
         untilTs,
       });
 
-      const substantive = [...topLevel, ...replies];
+      // Mentions come off the RAW messages, before annotation or truncation.
+      if (recipientId) {
+        mentions.push(...findDirectMentions({ recipientId, channelName: ch.name, topLevel, threads }));
+      }
+
+      const annotatedReplies = threads.flatMap((t) =>
+        t.replies.slice(-MAX_REPLIES_PER_THREAD).map((r) => annotateReply(r, t.parent)),
+      );
+      const substantive = [...topLevel, ...annotatedReplies];
       if (!substantive.length) {
         quiet.push(ch);
         continue;
@@ -377,16 +438,24 @@ export async function gatherChannelActivity({ client, channels, since, until, sc
       unreadable.push({ ...ch, error: code || String(e) });
     }
   }
-  return { active, quiet, unreadable };
+  return { active, quiet, unreadable, mentions };
 }
 
 /**
  * Assemble the prompt digest, newest-activity channels first and trimmed to the
  * total budget. What gets dropped is stated in the digest rather than vanishing.
- * @param {{ active: Array<BriefChannel & { messageCount: number, text: string }>, quiet?: BriefChannel[], conventions: import('../config/index.js').Conventions, since: string, until: string }} args
- * @returns {{ text: string, includedChannels: string[], droppedChannels: string[] }}
+ * @param {{ active: Array<BriefChannel & { messageCount: number, text: string }>, quiet?: BriefChannel[], mentions?: Array<{ channel: string, author: string, ts: string, text: string, answered: boolean }>, recipientName?: string, conventions: import('../config/index.js').Conventions, since: string, until: string }} args
+ * @returns {{ text: string, includedChannels: string[], droppedChannels: string[], openMentions: number }}
  */
-export function buildDigest({ active, quiet = [], conventions, since, until }) {
+export function buildDigest({
+  active,
+  quiet = [],
+  mentions = [],
+  recipientName = 'the reader',
+  conventions,
+  since,
+  until,
+}) {
   const byVolume = [...active].sort((a, b) => b.messageCount - a.messageCount);
   /** @type {string[]} */
   const sections = [];
@@ -429,17 +498,42 @@ export function buildDigest({ active, quiet = [], conventions, since, until }) {
       ? `NOTE: ${droppedChannels.length} channel(s) omitted from this digest for size — ${droppedChannels.join(', ')}. Say so at the end of the brief.\n`
       : '');
 
-  return { text: `${header}\n${sections.join('\n\n')}`, includedChannels, droppedChannels };
+  // The "Needs you" candidate list, decided in code by @-mention. Answered ones
+  // are named but marked, so the model knows not to raise them again.
+  const open = mentions.filter((m) => !m.answered);
+  const answered = mentions.filter((m) => m.answered);
+  const mentionBlock =
+    `=== TAGGED ${recipientName.toUpperCase()} DIRECTLY — the ONLY permitted source for part 2 ===\n` +
+    (open.length
+      ? open
+          .map((m) => `[#${m.channel}] ${m.author}: "${m.text}" — ${recipientName} has NOT replied in this thread.`)
+          .join('\n')
+      : `Nothing in the window tagged ${recipientName} and went unanswered.`) +
+    (answered.length
+      ? `\n\nAlready handled — ${recipientName} replied in-thread, DO NOT put these in part 2:\n` +
+        answered.map((m) => `[#${m.channel}] ${m.author}: "${m.text}"`).join('\n')
+      : '');
+
+  return {
+    text: `${header}\n${mentionBlock}\n\n${sections.join('\n\n')}`,
+    includedChannels,
+    droppedChannels,
+    openMentions: open.length,
+  };
 }
 
 /**
  * @param {string} voice
+ * @param {{ name: string, id: string }} recipient
  * @returns {string}
  */
-function buildSystemPrompt(voice) {
-  return `You are Pixelup Bot writing the morning brief for the founder of Pixelup Labs, a design agency. \
+function buildSystemPrompt(voice, recipient) {
+  return `You are Pixelup Bot writing the morning brief for ${recipient.name} at Pixelup Labs, a design agency. \
 Your input is a digest of yesterday's messages from the agency's INTERNAL Slack channels (team only — no clients \
-are in these channels). This brief is delivered as a private DM to the founder.
+are in these channels). This brief is delivered as a private DM to ${recipient.name}.
+
+THE READER IS ${recipient.name}, whose Slack ID is ${recipient.id} — they appear in the digest as <@${recipient.id}>. \
+"You" always means ${recipient.name} and nobody else. Any other <@U…> is a colleague, never the reader.
 
 Your job is to tell them what they need to know before their day starts, and nothing else. They will read this \
 in under a minute. Assume they have not read Slack.
@@ -466,10 +560,16 @@ together. And if some projects were silent, close the part with one line: "_No u
 
 *:two: Needs you*
 
-Only what genuinely requires the founder — a decision nobody else can make, an approval being waited on, or \
-something escalated to them by name. One bullet each, leading with the ask, and say who is waiting. Do not \
-repeat a project bullet here just because it is important; this part is for things that stall without them. \
-If there is nothing, write exactly "• Nothing blocking you." and stop.
+Draw this part ONLY from the digest's "TAGGED ... DIRECTLY" block. That block is computed in code from real \
+@-mentions, so it is the complete and authoritative list of what is waiting on ${recipient.name} — do not add \
+items from anywhere else in the digest, however important they look, and do not drop any item that is in it.
+
+One bullet per unanswered item, leading with the ask, naming who is waiting. Items marked "already handled" are \
+resolved: leave them out. If the block says nothing went unanswered, write exactly "• Nothing blocking you." \
+and stop.
+
+An approval question that tags nobody ("is this good enough to send?") does NOT belong here — it goes in part 1 \
+as project status, because nothing shows it is ${recipient.name}'s to answer.
 
 Attribute people by their Slack mention exactly as it appears (<@U123>) — do not invent names. Put the channel \
 in parens where it helps them go look. Keep the whole brief under 450 words. No preamble, no sign-off, at most \
@@ -479,12 +579,13 @@ one emoji beyond the two part markers.`;
 /**
  * Write the brief. Reads nothing, posts nothing, has no tools.
  * @param {string} digest
- * @param {{ conventions?: import('../config/index.js').Conventions, query?: typeof query }} [options]
+ * @param {{ conventions?: import('../config/index.js').Conventions, recipient?: { name: string, id: string }, query?: typeof query }} [options]
  * @returns {Promise<string>}
  */
 export async function summarizeBrief(digest, options = {}) {
   const conventions = options.conventions || loadConventions();
   const queryFn = options.query || query;
+  const recipient = options.recipient || { name: 'the reader', id: 'unknown' };
 
   const prompt =
     `${untrusted(digest, 'Slack digest')}\n\n` +
@@ -496,7 +597,7 @@ export async function summarizeBrief(digest, options = {}) {
     prompt,
     options: {
       model: MODEL,
-      systemPrompt: buildSystemPrompt(conventions.agency.voice),
+      systemPrompt: buildSystemPrompt(conventions.agency.voice, recipient),
       maxTurns: 1,
       allowedTools: [],
       permissionMode: 'default',
@@ -531,14 +632,19 @@ export async function deliverBrief({ client, recipientId, text }) {
 /**
  * Gather → summarize → DM. Returns what it did so the CLI can print it and the
  * scheduler can log it.
- * @param {{ client: import('@slack/web-api').WebClient, logger?: { info: Function, error: Function }, conventions?: import('../config/index.js').Conventions, recipientId?: string, since?: string, until?: string, deliver?: boolean, query?: typeof query }} args
- * @returns {Promise<{ brief: string, digest: string, active: Array<{ name: string, messageCount: number, threadsExpanded: number }>, quiet: string[], unreadable: Array<{ name: string, error: string }>, excluded: Array<{ name: string, reason: string }>, skipped: Array<{ name: string, reason: string }>, missing: Array<{ id: string, reason: string }>, deliveredTo: string | null, since: string, until: string }>}
+ * `recipientId` is who the brief is ABOUT — it anchors "Needs you". `deliverTo`
+ * is who this copy is SENT to, and defaults to the same person. They differ only
+ * when someone previews another person's brief: the section must stay anchored on
+ * the real subject, or a test copy silently reports the previewer's asks instead.
+ * @param {{ client: import('@slack/web-api').WebClient, logger?: { info: Function, error: Function }, conventions?: import('../config/index.js').Conventions, recipientId?: string, deliverTo?: string, since?: string, until?: string, deliver?: boolean, query?: typeof query }} args
+ * @returns {Promise<{ brief: string, digest: string, active: Array<{ name: string, messageCount: number, threadsExpanded: number }>, quiet: string[], unreadable: Array<{ name: string, error: string }>, excluded: Array<{ name: string, reason: string }>, skipped: Array<{ name: string, reason: string }>, mentions: Array<{ channel: string, author: string, ts: string, text: string, answered: boolean }>, recipientName: string, missing: Array<{ id: string, reason: string }>, deliveredTo: string | null, since: string, until: string }>}
  */
 export async function runDailyBrief({
   client,
   logger,
   conventions: given,
   recipientId,
+  deliverTo,
   since,
   until,
   deliver = true,
@@ -546,6 +652,7 @@ export async function runDailyBrief({
 }) {
   const conventions = given || loadConventions();
   const cfg = conventions.daily_brief || {};
+  const sendTo = deliverTo || recipientId;
   const timezone = cfg.timezone || DEFAULT_TIMEZONE;
   const now = new Date();
   const parts = zonedParts(now, timezone);
@@ -554,12 +661,20 @@ export async function runDailyBrief({
 
   const workspace = await listWorkspaceChannels(client);
   const { channels, excluded, missing, skipped } = selectInternalChannels(workspace, conventions);
-  const { active, quiet, unreadable } = await gatherChannelActivity({
+  // Who the brief is FOR. "Needs you" is anchored on this ID, so an unknown
+  // recipient must not silently become a guess — the section stays empty instead.
+  const recipient = {
+    id: recipientId || '',
+    name: (recipientId && conventions.users?.[recipientId]?.name) || 'the reader',
+  };
+
+  const { active, quiet, unreadable, mentions } = await gatherChannelActivity({
     client,
     channels,
     since: windowSince,
     until: windowUntil,
     scanHours: cfg.thread_scan_hours,
+    recipientId: recipient.id,
   });
 
   const summary = {
@@ -572,6 +687,8 @@ export async function runDailyBrief({
     unreadable: unreadable.map((c) => ({ name: `#${c.name}`, error: c.error })),
     excluded: excluded.map((c) => ({ name: `#${c.name}`, reason: c.reason })),
     skipped: skipped.map((c) => ({ name: `#${c.name}`, reason: c.reason })),
+    mentions,
+    recipientName: recipient.name,
     missing,
     since: windowSince,
     until: windowUntil,
@@ -580,7 +697,7 @@ export async function runDailyBrief({
   if (!active.length) {
     const brief = '*Morning brief* — no internal channel activity in the window. Nothing to report. :sunny:';
     let deliveredTo = null;
-    if (deliver && recipientId) deliveredTo = await deliverBrief({ client, recipientId, text: brief });
+    if (deliver && sendTo) deliveredTo = await deliverBrief({ client, recipientId: sendTo, text: brief });
     logger?.info('Daily brief: no activity in window.');
     return { ...summary, digest: '', brief, deliveredTo };
   }
@@ -588,11 +705,13 @@ export async function runDailyBrief({
   const { text: digest, droppedChannels } = buildDigest({
     active,
     quiet,
+    mentions,
+    recipientName: recipient.name,
     conventions,
     since: windowSince,
     until: windowUntil,
   });
-  const brief = await summarizeBrief(digest, { conventions, query: queryFn });
+  const brief = await summarizeBrief(digest, { conventions, recipient, query: queryFn });
 
   /** @type {string[]} */
   const footnotes = [];
@@ -607,7 +726,7 @@ export async function runDailyBrief({
   const text = footnotes.length ? `${brief}\n\n${footnotes.join('\n')}` : brief;
 
   let deliveredTo = null;
-  if (deliver && recipientId) deliveredTo = await deliverBrief({ client, recipientId, text });
+  if (deliver && sendTo) deliveredTo = await deliverBrief({ client, recipientId: sendTo, text });
   logger?.info(`Daily brief: ${active.length} active channel(s), delivered=${Boolean(deliveredTo)}.`);
 
   return { ...summary, digest, brief: text, deliveredTo };

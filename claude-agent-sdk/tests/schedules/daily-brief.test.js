@@ -4,6 +4,7 @@ import { describe, it, mock } from 'node:test';
 import {
   buildDigest,
   deliverBrief,
+  findDirectMentions,
   gatherChannelActivity,
   isSubstantiveMessage,
   lookbackHoursFor,
@@ -28,6 +29,7 @@ function conventionsOf(overrides = {}) {
     agency: { name: 'Pixelup Labs', voice: 'Direct.' },
     clients: {},
     channels: {},
+    users: { U1: { name: 'Arjun', clickup_user_id: 1, role: 'lead' } },
     ...overrides,
   };
 }
@@ -464,6 +466,114 @@ describe('gatherChannelActivity', () => {
   });
 });
 
+describe('findDirectMentions', () => {
+  const ME = 'UDAKSH';
+  const msg = (/** @type {any} */ o) => ({ type: 'message', user: 'U1', ts: '100', text: '', ...o });
+
+  it('finds a top-level message that tags the recipient', () => {
+    const found = findDirectMentions({
+      recipientId: ME,
+      channelName: 'acme-internal',
+      topLevel: [msg({ ts: '100', user: 'U1', text: `<@${ME}> can you approve this?` })],
+      threads: [],
+    });
+    assert.strictEqual(found.length, 1);
+    assert.strictEqual(found[0].channel, 'acme-internal');
+    assert.strictEqual(found[0].author, '<@U1>');
+    assert.strictEqual(found[0].answered, false);
+  });
+
+  it('ignores messages that tag somebody else', () => {
+    const found = findDirectMentions({
+      recipientId: ME,
+      channelName: 'acme-internal',
+      topLevel: [msg({ text: '<@USOMEONE> can you approve this?' })],
+      threads: [],
+    });
+    assert.deepStrictEqual(found, []);
+  });
+
+  it('ignores a message the recipient wrote themselves', () => {
+    const found = findDirectMentions({
+      recipientId: ME,
+      channelName: 'acme-internal',
+      topLevel: [msg({ user: ME, text: `cc <@${ME}> for my own reference` })],
+      threads: [],
+    });
+    assert.deepStrictEqual(found, []);
+  });
+
+  it('marks a mention ANSWERED when the recipient replied later in the thread', () => {
+    const parent = msg({ ts: '100', user: 'U1', text: `<@${ME}> ok to send?`, thread_ts: '100' });
+    const found = findDirectMentions({
+      recipientId: ME,
+      channelName: 'acme-internal',
+      topLevel: [parent],
+      threads: [{ parent, replies: [msg({ ts: '200', user: ME, text: 'yes, go ahead', thread_ts: '100' })] }],
+    });
+    assert.strictEqual(found.length, 1);
+    assert.strictEqual(found[0].answered, true);
+  });
+
+  it('leaves a mention OPEN when only someone else replied', () => {
+    const parent = msg({ ts: '100', user: 'U1', text: `<@${ME}> ok to send?`, thread_ts: '100' });
+    const found = findDirectMentions({
+      recipientId: ME,
+      channelName: 'acme-internal',
+      topLevel: [parent],
+      threads: [{ parent, replies: [msg({ ts: '200', user: 'U9', text: 'bumping this', thread_ts: '100' })] }],
+    });
+    assert.strictEqual(found[0].answered, false);
+  });
+
+  it('does not count a recipient reply that predates the mention', () => {
+    const parent = msg({ ts: '100', user: ME, text: 'starting this', thread_ts: '100' });
+    const found = findDirectMentions({
+      recipientId: ME,
+      channelName: 'acme-internal',
+      topLevel: [parent],
+      threads: [{ parent, replies: [msg({ ts: '200', user: 'U1', text: `<@${ME}> your call`, thread_ts: '100' })] }],
+    });
+    assert.strictEqual(found.length, 1, 'the reply tagging them is the mention');
+    assert.strictEqual(found[0].answered, false, 'their earlier message does not answer a later ask');
+  });
+
+  it('finds a mention that lives in a thread reply', () => {
+    const parent = msg({ ts: '100', user: 'U1', text: 'QA round 3', thread_ts: '100' });
+    const found = findDirectMentions({
+      recipientId: ME,
+      channelName: 'acme-internal',
+      topLevel: [],
+      threads: [
+        { parent, replies: [msg({ ts: '300', user: 'U2', text: `<@${ME}> need a decision`, thread_ts: '100' })] },
+      ],
+    });
+    assert.strictEqual(found.length, 1);
+    assert.strictEqual(found[0].author, '<@U2>');
+  });
+
+  it('returns nothing when there is no recipient to anchor on', () => {
+    const found = findDirectMentions({
+      recipientId: '',
+      channelName: 'acme-internal',
+      topLevel: [msg({ text: '<@UDAKSH> hello' })],
+      threads: [],
+    });
+    assert.deepStrictEqual(found, []);
+  });
+
+  it('does not double-count a message present as both top-level and thread parent', () => {
+    const parent = msg({ ts: '100', user: 'U1', text: `<@${ME}> approve?`, thread_ts: '100' });
+    const found = findDirectMentions({
+      recipientId: ME,
+      channelName: 'acme-internal',
+      topLevel: [parent],
+      threads: [{ parent, replies: [] }],
+    });
+    assert.strictEqual(found.length, 1);
+  });
+});
+
 describe('buildDigest', () => {
   const conventions = conventionsOf({ clients: { acme: { display_name: 'Acme Corp' } } });
 
@@ -563,6 +673,57 @@ describe('buildDigest', () => {
       until: 'U',
     });
     assert.doesNotMatch(text, /NO activity/);
+  });
+
+  it('puts open mentions in the digest as the only source for part 2', () => {
+    const { text, openMentions } = buildDigest({
+      active: [
+        {
+          id: 'C1',
+          name: 'acme-internal',
+          clientKey: 'acme',
+          isMember: true,
+          source: 'config-internal',
+          messageCount: 1,
+          text: 'x',
+        },
+      ],
+      mentions: [
+        { channel: 'acme-internal', author: '<@U1>', ts: '100', text: 'need your sign-off', answered: false },
+        { channel: 'acme-internal', author: '<@U2>', ts: '200', text: 'already sorted', answered: true },
+      ],
+      recipientName: 'Daksh',
+      conventions: /** @type {any} */ (conventions),
+      since: 'S',
+      until: 'U',
+    });
+    assert.strictEqual(openMentions, 1);
+    assert.match(text, /TAGGED DAKSH DIRECTLY/);
+    assert.match(text, /need your sign-off" — Daksh has NOT replied/);
+    assert.match(text, /Already handled[\s\S]*already sorted/);
+  });
+
+  it('says plainly when nothing tagged the recipient', () => {
+    const { text, openMentions } = buildDigest({
+      active: [
+        {
+          id: 'C1',
+          name: 'acme-internal',
+          clientKey: 'acme',
+          isMember: true,
+          source: 'config-internal',
+          messageCount: 1,
+          text: 'x',
+        },
+      ],
+      mentions: [],
+      recipientName: 'Daksh',
+      conventions: /** @type {any} */ (conventions),
+      since: 'S',
+      until: 'U',
+    });
+    assert.strictEqual(openMentions, 0);
+    assert.match(text, /Nothing in the window tagged Daksh and went unanswered/);
   });
 
   it('orders the busiest channel first', () => {
@@ -748,6 +909,115 @@ describe('runDailyBrief', () => {
     assert.match(result.digest, /yes go ahead/, 'the answer reached the prompt');
     assert.strictEqual(result.active[0].threadsExpanded, 1);
     assert.strictEqual(result.active[0].messageCount, 2);
+  });
+
+  it('anchors "Needs you" on the RECIPIENT, not on whoever is mentioned most', async () => {
+    // The bug this guards: the prompt used to say "the founder" with no ID, so the
+    // model inferred the reader from context. Here U1 is tagged three times and the
+    // recipient (U1 is NOT the recipient) once — only the recipient's tag counts.
+    const t = Number(recentTs());
+    const client = slackClient({
+      channels: [{ id: 'C1', name: 'acme-internal', is_member: true }],
+      history: {
+        C1: [
+          { type: 'message', user: 'U9', ts: String(t), text: '<@U1> and <@U1> and <@U1> please look' },
+          { type: 'message', user: 'U9', ts: String(t + 10), text: '<@UDAKSH> need your decision' },
+        ],
+      },
+    });
+    const conv = {
+      ...conventions,
+      users: { UDAKSH: { name: 'Daksh', clickup_user_id: 2, role: 'lead' } },
+    };
+    const result = await runDailyBrief({
+      client: /** @type {any} */ (client),
+      conventions: /** @type {any} */ (conv),
+      recipientId: 'UDAKSH',
+      deliver: false,
+      query: /** @type {any} */ (fakeQuery('brief body')),
+    });
+    assert.strictEqual(result.recipientName, 'Daksh');
+    assert.deepStrictEqual(
+      result.mentions.map((m) => m.text),
+      ['<@UDAKSH> need your decision'],
+      'only the recipient tag becomes a candidate',
+    );
+    assert.match(result.digest, /TAGGED DAKSH DIRECTLY/);
+    assert.match(result.digest, /Daksh has NOT replied/);
+  });
+
+  it('previews another person\'s brief without re-anchoring "Needs you" on the reader', async () => {
+    // Sending Arjun a preview of Daksh's brief must still compute Needs you for
+    // DAKSH — otherwise the test copy quietly reports the wrong person's asks.
+    const t = Number(recentTs());
+    const client = slackClient({
+      channels: [{ id: 'C1', name: 'acme-internal', is_member: true }],
+      history: {
+        C1: [
+          { type: 'message', user: 'U9', ts: String(t), text: '<@UDAKSH> your call on this' },
+          { type: 'message', user: 'U9', ts: String(t + 5), text: '<@UARJUN> fyi only' },
+        ],
+      },
+    });
+    const conv = {
+      ...conventions,
+      users: {
+        UDAKSH: { name: 'Daksh', clickup_user_id: 2, role: 'lead' },
+        UARJUN: { name: 'Arjun', clickup_user_id: 1, role: 'lead' },
+      },
+    };
+    const result = await runDailyBrief({
+      client: /** @type {any} */ (client),
+      conventions: /** @type {any} */ (conv),
+      recipientId: 'UDAKSH',
+      deliverTo: 'UARJUN',
+      deliver: true,
+      query: /** @type {any} */ (fakeQuery('brief body')),
+    });
+    assert.strictEqual(result.recipientName, 'Daksh', 'subject stays Daksh');
+    assert.deepStrictEqual(
+      result.mentions.map((m) => m.text),
+      ['<@UDAKSH> your call on this'],
+      "Arjun's mention must not become a candidate",
+    );
+    // ...but the DM went to Arjun.
+    assert.strictEqual(client.conversations.open.mock.calls[0].arguments[0].users, 'UARJUN');
+    assert.strictEqual(result.deliveredTo, 'D1');
+  });
+
+  it('delivers to the subject when no separate target is given', async () => {
+    const client = slackClient({
+      channels: [{ id: 'C1', name: 'acme-internal', is_member: true }],
+      history: { C1: [{ type: 'message', user: 'U9', ts: recentTs(), text: 'hello' }] },
+    });
+    await runDailyBrief({
+      client: /** @type {any} */ (client),
+      conventions: /** @type {any} */ (conventions),
+      recipientId: 'UDAKSH',
+      deliver: true,
+      query: /** @type {any} */ (fakeQuery('brief body')),
+    });
+    assert.strictEqual(client.conversations.open.mock.calls[0].arguments[0].users, 'UDAKSH');
+  });
+
+  it('reports no candidates when the recipient was never tagged', async () => {
+    const client = slackClient({
+      channels: [{ id: 'C1', name: 'acme-internal', is_member: true }],
+      history: { C1: [{ type: 'message', user: 'U9', ts: recentTs(), text: 'is this good enough to send?' }] },
+    });
+    const result = await runDailyBrief({
+      client: /** @type {any} */ (client),
+      conventions: /** @type {any} */ ({
+        ...conventions,
+        users: { UDAKSH: { name: 'Daksh', clickup_user_id: 2, role: 'lead' } },
+      }),
+      recipientId: 'UDAKSH',
+      deliver: false,
+      query: /** @type {any} */ (fakeQuery('brief body')),
+    });
+    // An untagged approval question must NOT become a "Needs you" candidate.
+    assert.deepStrictEqual(result.mentions, []);
+    assert.match(result.digest, /Nothing in the window tagged Daksh and went unanswered/);
   });
 
   it('sends a short no-activity note without calling the model', async () => {

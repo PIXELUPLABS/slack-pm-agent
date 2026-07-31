@@ -183,6 +183,14 @@
       "qa_list_id": "",
       "folder_id": "",
       "aliases": ["SunsetHQ", "Sunset"]
+    },
+    "reo": {
+      "display_name": "Reo",
+      "channel_id": "",
+      "internal_channel_id": "C0B6MVBRNQN",
+      "list_id": "",
+      "qa_list_id": "",
+      "folder_id": ""
     }
   },
   "users": {
@@ -258,10 +266,10 @@
   },
   "daily_brief": {
     "enabled": true,
-    "recipient_slack_id": "U09RKSU0QSX",
+    "recipient_slack_id": "U0760QB4EGZ",
     "days": ["monday", "tuesday", "wednesday", "thursday", "friday"],
-    "hour": 21,
-    "minute": 5,
+    "hour": 10,
+    "minute": 57,
     "timezone": "Asia/Kolkata",
     "lookback_hours": 24,
     "monday_lookback_hours": 72,

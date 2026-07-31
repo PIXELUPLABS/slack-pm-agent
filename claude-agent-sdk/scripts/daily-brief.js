@@ -27,6 +27,10 @@ import {
  *   --since <ts>    Explicit window start (YYYY-MM-DD or full ISO timestamp).
  *   --digest        Also print the raw digest handed to the model.
  *   --dm [user-id]  Actually send the DM. Bare --dm uses daily_brief.recipient_slack_id.
+ *                   Passing an id changes only WHO RECEIVES this copy — "Needs you"
+ *                   stays anchored on daily_brief.recipient_slack_id, so previewing
+ *                   someone else's brief cannot silently make it yours.
+ *   --as <user-id>  Change who the brief is ABOUT (overrides daily_brief.recipient_slack_id).
  *
  * Requires SLACK_BOT_TOKEN (app settings → OAuth & Permissions → Bot User OAuth
  * Token) and, for anything but --coverage, ANTHROPIC_API_KEY. The bot only sees
@@ -58,9 +62,17 @@ const conventions = loadConventions();
 const cfg = conventions.daily_brief || {};
 const client = new WebClient(token);
 
-const recipientId = flagValue('--dm') || cfg.recipient_slack_id || '';
-if (wantsDm && !recipientId) {
-  console.error('--dm needs a recipient: pass one (--dm U123…) or set daily_brief.recipient_slack_id in conventions.');
+// The brief is always ABOUT daily_brief.recipient_slack_id — that is what anchors
+// "Needs you". --dm only changes WHERE this copy lands, so previewing someone
+// else's brief cannot silently re-anchor the section on the previewer.
+const subjectId = flagValue('--as') || cfg.recipient_slack_id || '';
+const deliverTo = flagValue('--dm') || subjectId;
+if (wantsDm && !deliverTo) {
+  console.error('--dm needs a target: pass one (--dm U123…) or set daily_brief.recipient_slack_id in conventions.');
+  process.exit(1);
+}
+if (!subjectId) {
+  console.error('No subject for the brief: set daily_brief.recipient_slack_id, or pass --as U123….');
   process.exit(1);
 }
 
@@ -115,14 +127,19 @@ if (hoursArg && !Number.isFinite(hours)) {
 }
 const since = sinceArg || windowStart(now, hours);
 
-console.log(
-  `\n${label('Daily brief')} ${dim(`— window ${since} → now${wantsDm ? '' : '  (dry run, nothing will be sent)'}`)}\n`,
-);
+const subjectName = conventions.users?.[subjectId]?.name || subjectId;
+const targetName = conventions.users?.[deliverTo]?.name || deliverTo;
+console.log(`\n${label('Daily brief')} ${dim(`— window ${since} → now`)}`);
+console.log(dim(`  about: ${subjectName} (${subjectId})  ·  "Needs you" is anchored here`));
+const previewNote = wantsDm && deliverTo !== subjectId ? '   ← PREVIEW: different person than the subject' : '';
+const target = wantsDm ? `${targetName} (${deliverTo})` : 'nobody — dry run';
+console.log(`${dim(`  sends to: ${target}${previewNote}`)}\n`);
 
 const result = await runDailyBrief({
   client,
   conventions,
-  recipientId,
+  recipientId: subjectId,
+  deliverTo,
   since,
   deliver: wantsDm,
   logger: { info: (/** @type {string} */ m) => console.log(dim(`  ${m}`)), error: console.error },
@@ -139,6 +156,18 @@ if (result.unreadable.length) {
   for (const c of result.unreadable) console.log(`  ✗ ${c.name} ${dim(c.error)}`);
 }
 
+// The code-derived basis for "Needs you" — auditable without reading the prompt.
+console.log(`\n${label(`Tagged ${result.recipientName} directly`)} ${dim('(the only source for "Needs you")')}`);
+if (result.mentions.length) {
+  for (const m of result.mentions) {
+    const state = m.answered ? dim('answered in-thread → excluded') : '\x1b[33mopen\x1b[0m';
+    console.log(`  • #${m.channel} ${m.author} — ${state}`);
+    console.log(`    ${dim(m.text.slice(0, 120))}`);
+  }
+} else {
+  console.log(dim('  nothing in the window tagged them'));
+}
+
 if (showDigest) {
   console.log(`\n${label('Digest handed to the model')}\n${dim('─'.repeat(60))}`);
   console.log(result.digest || '(empty)');
@@ -149,7 +178,7 @@ console.log(result.brief);
 console.log(dim('─'.repeat(60)));
 
 if (result.deliveredTo) {
-  console.log(`\n✓ DM'd to ${recipientId} ${dim(`(conversation ${result.deliveredTo})`)}\n`);
+  console.log(`\n✓ DM'd to ${targetName} (${deliverTo}) ${dim(`(conversation ${result.deliveredTo})`)}\n`);
 } else {
   console.log(
     `\n${dim(`Dry run — nothing sent. Re-run with --dm${cfg.recipient_slack_id ? '' : ' U…'} to deliver it.`)}\n`,

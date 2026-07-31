@@ -44,8 +44,9 @@ npm start            # Start the app
 npm run auth:clickup    # One-time OAuth flow for the ClickUp MCP server
 npm run auth:fireflies  # One-time OAuth flow for the Fireflies MCP server
 npm run brief:coverage  # Which internal channels can the bot read? (free — no history reads, no model call)
-npm run brief           # Build the founder brief and print it (sends nothing)
+npm run brief           # Build the brief and print it (sends nothing)
 npm run brief -- --dm   # ...and DM it to daily_brief.recipient_slack_id
+npm run brief -- --dm U09RKSU0QSX   # preview someone else's brief; "Needs you" stays anchored on the configured recipient
 npm run lint         # Biome lint and format check
 npm run lint:fix     # Auto-fix lint and format issues
 npm run check        # Type check JavaScript with tsc (checkJs)
