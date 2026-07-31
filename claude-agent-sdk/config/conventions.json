@@ -257,11 +257,11 @@
     "timezone": "Asia/Kolkata"
   },
   "daily_brief": {
-    "enabled": false,
+    "enabled": true,
     "recipient_slack_id": "U09RKSU0QSX",
     "days": ["monday", "tuesday", "wednesday", "thursday", "friday"],
-    "hour": 9,
-    "minute": 0,
+    "hour": 21,
+    "minute": 15,
     "timezone": "Asia/Kolkata",
     "lookback_hours": 24,
     "monday_lookback_hours": 72,
