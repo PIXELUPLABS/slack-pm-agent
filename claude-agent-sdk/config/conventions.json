@@ -261,7 +261,7 @@
     "recipient_slack_id": "U09RKSU0QSX",
     "days": ["monday", "tuesday", "wednesday", "thursday", "friday"],
     "hour": 21,
-    "minute": 15,
+    "minute": 5,
     "timezone": "Asia/Kolkata",
     "lookback_hours": 24,
     "monday_lookback_hours": 72,
