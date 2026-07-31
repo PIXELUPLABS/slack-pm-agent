@@ -107,7 +107,7 @@
     },
     "monumint": {
       "display_name": "Monumint",
-      "channel_id": "C_TODO_MONUMINT",
+      "channel_id": "C0B4CMRGB0W",
       "internal_channel_id": "C0B4ER0CQHY",
       "list_id": "901615029196",
       "qa_list_id": "901615541652",
@@ -115,7 +115,7 @@
     },
     "greptile": {
       "display_name": "Greptile",
-      "channel_id": "C_TODO_GREPTILE",
+      "channel_id": "C0A78HG8GUF",
       "internal_channel_id": "C0869LPU5QD",
       "list_id": "901615128110",
       "qa_list_id": "",
@@ -160,7 +160,7 @@
     },
     "induction": {
       "display_name": "Induction",
-      "channel_id": "C_TODO_INDUCTION",
+      "channel_id": "C0BGFCS1W4C",
       "internal_channel_id": "C0BJG2RB9HT",
       "list_id": "901616056242",
       "qa_list_id": "901616056244",
@@ -177,7 +177,7 @@
     },
     "sunsethq": {
       "display_name": "Sunset HQ",
-      "channel_id": "",
+      "channel_id": "C0BKTL02NEN",
       "internal_channel_id": "C0BKMCYLSSF",
       "list_id": "",
       "qa_list_id": "",
