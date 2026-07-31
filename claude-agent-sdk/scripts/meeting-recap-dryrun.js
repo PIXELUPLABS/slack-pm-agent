@@ -18,9 +18,9 @@ import {
  * summarizer — but prints every decision and the recap instead of posting, so a
  * transcript can be checked end to end without spamming an internal channel.
  *
- *   node scripts/test-meeting-recap.js                    # newest transcript thread
- *   node scripts/test-meeting-recap.js <slack-permalink>  # a specific thread
- *   node scripts/test-meeting-recap.js <thread-ts>
+ *   node scripts/meeting-recap-dryrun.js                    # newest transcript thread
+ *   node scripts/meeting-recap-dryrun.js <slack-permalink>  # a specific thread
+ *   node scripts/meeting-recap-dryrun.js <thread-ts>
  *
  * Flags:
  *   --gates-only  Stop before the model call (no ANTHROPIC_API_KEY needed, no cost).

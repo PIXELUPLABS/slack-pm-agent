@@ -1,6 +1,7 @@
 import { tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 
+import { resolveChannelName } from '../../config/resolver.js';
 import {
   extractDocxText,
   extractPdfText,
@@ -54,6 +55,32 @@ function messageReferences(m) {
 }
 
 /**
+ * Emoji reactions on a message, by Slack emoji NAME (`white_check_mark`, not
+ * "✅" — the API never sends the character). The team uses these as status
+ * markers, so dropping them made the agent confidently report "no ✅ reactions"
+ * on threads full of them: a silent false negative, worse than an error.
+ *
+ * Reactors are listed because "who signed off" is the usual follow-up question.
+ * Slack truncates its own `users` array on busy messages, so the count is
+ * authoritative and the names may be a subset — say so rather than implying the
+ * list is complete.
+ * @param {any} m
+ * @returns {string}
+ */
+function messageReactions(m) {
+  const parts = [];
+  for (const r of m.reactions || []) {
+    if (!r.name) continue;
+    const count = r.count ?? (r.users || []).length;
+    const users = (r.users || []).map((/** @type {string} */ u) => `<@${u}>`);
+    const shown =
+      users.length && users.length < count ? `${users.join(', ')}, +${count - users.length} more` : users.join(', ');
+    parts.push(`:${r.name}: ×${count}${shown ? ` (${shown})` : ''}`);
+  }
+  return parts.join(', ');
+}
+
+/**
  * Render messages as compact chronological lines (oldest → newest, the order
  * someone reading the channel would see) within the character budget.
  * @param {any[]} messages
@@ -62,7 +89,7 @@ function messageReferences(m) {
  */
 export function compactMessages(messages, options = {}) {
   const lines = messages
-    .filter((m) => m.type === 'message' && (m.text || m.files?.length || m.attachments?.length))
+    .filter((m) => m.type === 'message' && (m.text || m.files?.length || m.attachments?.length || m.reactions?.length))
     .slice()
     .sort((a, b) => Number(a.ts) - Number(b.ts))
     .map((m) => {
@@ -70,7 +97,9 @@ export function compactMessages(messages, options = {}) {
       const refs = messageReferences(m);
       const refNote = refs.length ? ` [attached: ${refs.join(' | ')}]` : '';
       const threadNote = m.reply_count ? ` [thread: ${m.reply_count} repl${m.reply_count === 1 ? 'y' : 'ies'}]` : '';
-      return `[ts:${m.ts}] ${who}: ${m.text || ''}${refNote}${threadNote}`;
+      const reactions = messageReactions(m);
+      const reactionNote = reactions ? ` [reactions: ${reactions}]` : '';
+      return `[ts:${m.ts}] ${who}: ${m.text || ''}${refNote}${reactionNote}${threadNote}`;
     });
 
   const maxChars = options.maxChars ?? MAX_HISTORY_CHARS;
@@ -243,6 +272,33 @@ export async function lookupChannelIdByName(client, name) {
 }
 
 /**
+ * The channel this conversation is happening IN, when there is one.
+ *
+ * Tagged in #foo, "summarize the last 15 messages" obviously means #foo — but
+ * the agent used to have no way to know that and would guess a channel from the
+ * wording. In a DM there is no such channel: the DM's own history is not what
+ * anyone means by "the channel", so this returns null and the caller asks.
+ *
+ * Fail-closed on purpose. A conversation only counts as a channel if Slack
+ * gives back a NAME for it — `conversations.info` returns none for an im/mpim —
+ * so an unidentifiable conversation is treated as a DM rather than defaulting a
+ * read at some channel nobody asked for. The lookup is memoized for 30 min in
+ * the resolver and already warmed by the listener's post-guard, so this is
+ * effectively free.
+ * @param {{ client?: import('@slack/web-api').WebClient, channelId?: string, channelType?: string }} [deps]
+ * @returns {Promise<{ id: string, name: string } | null>}
+ */
+export async function resolveAmbientChannel(deps) {
+  if (!deps?.client || !deps.channelId) return null;
+  if (deps.channelType === 'im' || deps.channelType === 'mpim') return null;
+  // `channel_type` is absent on some event shapes; a D-prefixed ID is a DM
+  // regardless of what the payload did or didn't say.
+  if (deps.channelId.startsWith('D')) return null;
+  const name = await resolveChannelName(deps.client, deps.channelId);
+  return name ? { id: deps.channelId, name } : null;
+}
+
+/**
  * Read-only Slack tools scoped to what the workflows need: reading client
  * channels for task intake, reading QA threads, and reading shared files
  * (engagement docs). The bot reads client channels but NEVER posts there.
@@ -255,9 +311,18 @@ export function createSlackReadTools(deps, conventions) {
     'read_channel_messages',
     'Messages from any channel the bot is in — reads paginate, so the whole channel is available, not just one page. ' +
       'Accepts a client key (external client channel), a channel name (e.g. "monumint-internal"), or a raw channel ID. ' +
-      'Set entire_channel: true to sweep the full history, or pass a larger limit / a date range. Read-only.',
+      'Set entire_channel: true to sweep the full history, or pass a larger limit / a date range. ' +
+      'Emoji reactions come back as [reactions: :name: ×count (who)] by Slack emoji NAME, never the character. ' +
+      'Omit channel to read the channel this conversation is in — that is what an unqualified request means when ' +
+      'you were tagged in a channel. In a DM there is no such channel, so one must be named. Read-only.',
     {
-      channel: z.string().describe('Client key, channel name, or Slack channel ID.'),
+      channel: z
+        .string()
+        .optional()
+        .describe(
+          'Client key, channel name, or Slack channel ID. Omit to use the channel this conversation is in ' +
+            '(only works when tagged in a channel, not in a DM).',
+        ),
       limit: z
         .number()
         .int()
@@ -274,10 +339,26 @@ export function createSlackReadTools(deps, conventions) {
     },
     async ({ channel, limit, entire_channel, since_date, until_date }) => {
       try {
-        const resolved = resolveChannelArg(conventions, channel);
-        let channelId = resolved.id;
-        if (!channelId && resolved.lookupName) {
-          channelId = await lookupChannelIdByName(deps.client, resolved.lookupName);
+        /** @type {string | undefined} */
+        let channelId;
+        /** @type {{ id?: string, lookupName?: string }} */
+        let resolved = {};
+        if (channel) {
+          resolved = resolveChannelArg(conventions, channel);
+          channelId = resolved.id;
+          if (!channelId && resolved.lookupName) {
+            channelId = await lookupChannelIdByName(deps.client, resolved.lookupName);
+          }
+        } else {
+          // No channel named → the one we're being spoken to in.
+          const ambient = await resolveAmbientChannel(deps);
+          if (!ambient) {
+            return asResult(
+              'No channel given, and this conversation is a DM — there is no surrounding channel to read. ' +
+                'Ask which channel they mean (a client key, a channel name, or a channel ID).',
+            );
+          }
+          channelId = ambient.id;
         }
         if (!channelId) {
           return asResult(

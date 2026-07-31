@@ -7,8 +7,10 @@ import {
   fetchThreadReplies,
   lookupChannelIdByName,
   resetChannelCache,
+  resolveAmbientChannel,
   resolveChannelArg,
 } from '../../../agent/tools/slack-read.js';
+import { resetResolverCache } from '../../../config/resolver.js';
 
 /** @returns {any} Minimal conventions shape for channel resolution. */
 function conventions() {
@@ -175,6 +177,61 @@ describe('compactMessages', () => {
     assert.ok(text.includes('3 replies'));
   });
 
+  it('renders reactions by emoji name with who reacted', () => {
+    const text = compactMessages([
+      {
+        type: 'message',
+        ts: '100',
+        user: 'U1',
+        text: 'homepage hero shipped',
+        reactions: [
+          { name: 'white_check_mark', count: 2, users: ['U2', 'U3'] },
+          { name: 'eyes', count: 1, users: ['U4'] },
+        ],
+      },
+    ]);
+    assert.ok(text.includes(':white_check_mark: ×2 (<@U2>, <@U3>)'));
+    assert.ok(text.includes(':eyes: ×1 (<@U4>)'));
+  });
+
+  it('trusts the count over a users list Slack truncated', () => {
+    const text = compactMessages([
+      {
+        type: 'message',
+        ts: '100',
+        user: 'U1',
+        text: 'ship it',
+        reactions: [{ name: 'tada', count: 9, users: ['U2'] }],
+      },
+    ]);
+    assert.ok(text.includes(':tada: ×9 (<@U2>, +8 more)'));
+  });
+
+  it('omits the reaction note entirely when nothing reacted', () => {
+    const text = compactMessages([{ type: 'message', ts: '100', user: 'U1', text: 'plain', reactions: [] }]);
+    assert.ok(!text.includes('[reactions:'));
+  });
+
+  it('keeps a message whose only signal is a reaction', () => {
+    const text = compactMessages([
+      { type: 'message', ts: '100', user: 'U1', reactions: [{ name: 'white_check_mark', count: 1, users: ['U2'] }] },
+    ]);
+    assert.ok(text.includes(':white_check_mark:'));
+  });
+
+  it('falls back to the users length when Slack omits count', () => {
+    const text = compactMessages([
+      {
+        type: 'message',
+        ts: '100',
+        user: 'U1',
+        text: 'done',
+        reactions: [{ name: 'heavy_check_mark', users: ['U2', 'U3'] }],
+      },
+    ]);
+    assert.ok(text.includes(':heavy_check_mark: ×2'));
+  });
+
   it('drops the oldest messages when over the size budget and says so', () => {
     const messages = Array.from({ length: 50 }, (_, i) => ({
       type: 'message',
@@ -187,6 +244,71 @@ describe('compactMessages', () => {
     assert.ok(text.includes('older message(s) omitted'));
     assert.ok(text.includes('ts:149')); // newest survives
     assert.ok(!text.includes('ts:100')); // oldest dropped
+  });
+});
+
+describe('resolveAmbientChannel', () => {
+  beforeEach(() => resetResolverCache());
+
+  /** @param {string | null} name */
+  function clientNaming(name) {
+    return {
+      conversations: {
+        info: mock.fn(async () => (name === null ? {} : { channel: { name } })),
+      },
+    };
+  }
+
+  it('resolves the channel the conversation is happening in', async () => {
+    const client = clientNaming('greptile-internal');
+    const ambient = await resolveAmbientChannel({
+      client: /** @type {any} */ (client),
+      channelId: 'C0869LPU5QD',
+      channelType: 'channel',
+    });
+    assert.deepStrictEqual(ambient, { id: 'C0869LPU5QD', name: 'greptile-internal' });
+  });
+
+  it('returns null in a DM, so a read cannot silently target the DM itself', async () => {
+    const client = clientNaming('whatever');
+    const ambient = await resolveAmbientChannel({
+      client: /** @type {any} */ (client),
+      channelId: 'D0USER',
+      channelType: 'im',
+    });
+    assert.strictEqual(ambient, null);
+    assert.strictEqual(client.conversations.info.mock.callCount(), 0);
+  });
+
+  it('treats a D-prefixed ID as a DM even when channel_type is missing', async () => {
+    const client = clientNaming('whatever');
+    const ambient = await resolveAmbientChannel({ client: /** @type {any} */ (client), channelId: 'D0USER' });
+    assert.strictEqual(ambient, null);
+  });
+
+  it('returns null for a group DM', async () => {
+    const client = clientNaming(null);
+    const ambient = await resolveAmbientChannel({
+      client: /** @type {any} */ (client),
+      channelId: 'G0GROUP',
+      channelType: 'mpim',
+    });
+    assert.strictEqual(ambient, null);
+  });
+
+  it('fails closed when Slack gives back no name', async () => {
+    const client = clientNaming(null);
+    const ambient = await resolveAmbientChannel({
+      client: /** @type {any} */ (client),
+      channelId: 'C0MYSTERY',
+      channelType: 'channel',
+    });
+    assert.strictEqual(ambient, null);
+  });
+
+  it('returns null without a client or channel', async () => {
+    assert.strictEqual(await resolveAmbientChannel(undefined), null);
+    assert.strictEqual(await resolveAmbientChannel({ channelId: 'C0X' }), null);
   });
 });
 
