@@ -46,7 +46,7 @@ import { isPlaceholderId, resetResolverCache } from './resolver.js';
  * @property {Record<string, InternalListConfig>} [internal_lists] - Non-client ClickUp lists (e.g. Automation Ideas in Operations) the agent may log to.
  * @property {{ drafts_channel_id: string, conversation_channel_ids?: string[] }} channels
  * @property {{ enabled: boolean, days: string[], hour: number, minute: number, timezone: string }} client_updates
- * @property {{ enabled?: boolean, channel_id: string, internal_email_domains?: string[] }} [meeting_transcripts] - Fireflies transcript → internal recap automation.
+ * @property {{ enabled?: boolean, channel_id: string, internal_email_domains?: string[], ignore_title_patterns?: string[] }} [meeting_transcripts] - Fireflies transcript → internal recap automation.
  */
 
 const DEFAULT_PATH = new URL('./conventions.json', import.meta.url);
@@ -143,6 +143,13 @@ export function validateConventions(data) {
           mt.internal_email_domains.some((/** @type {any} */ d) => typeof d !== 'string'))
       ) {
         problems.push('meeting_transcripts.internal_email_domains must be an array of strings when present');
+      }
+      if (
+        mt.ignore_title_patterns !== undefined &&
+        (!Array.isArray(mt.ignore_title_patterns) ||
+          mt.ignore_title_patterns.some((/** @type {any} */ p) => typeof p !== 'string'))
+      ) {
+        problems.push('meeting_transcripts.ignore_title_patterns must be an array of strings when present');
       }
     }
   }

@@ -5,7 +5,12 @@
   },
   "clickup": {
     "task_name_format": "[{client}] {title}",
-    "priorities": { "urgent": 1, "high": 2, "normal": 3, "low": 4 },
+    "priorities": {
+      "urgent": 1,
+      "high": 2,
+      "normal": 3,
+      "low": 4
+    },
     "default_priority": "normal",
     "statuses": ["to do", "in progress", "review", "done"],
     "default_status": "to do"
@@ -30,8 +35,16 @@
     }
   },
   "users": {
-    "U0000000LEAD": { "name": "Example Lead", "clickup_user_id": 10000001, "role": "lead" },
-    "U000000MEMBR": { "name": "Example Designer", "clickup_user_id": 10000002, "role": "member" }
+    "U0000000LEAD": {
+      "name": "Example Lead",
+      "clickup_user_id": 10000001,
+      "role": "lead"
+    },
+    "U000000MEMBR": {
+      "name": "Example Designer",
+      "clickup_user_id": 10000002,
+      "role": "member"
+    }
   },
   "channels": {
     "drafts_channel_id": ""
@@ -46,6 +59,7 @@
   "meeting_transcripts": {
     "enabled": true,
     "channel_id": "C0TRANSCRIPT",
-    "internal_email_domains": ["pixelup.in"]
+    "internal_email_domains": ["pixelup.in"],
+    "ignore_title_patterns": ["standup", "retro", "allhands", "internalsync", "huddle", "teamsync", "leadership"]
   }
 }

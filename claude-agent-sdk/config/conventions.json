@@ -108,6 +108,7 @@
     "monumint": {
       "display_name": "Monumint",
       "channel_id": "C_TODO_MONUMINT",
+      "internal_channel_id": "C0B4ER0CQHY",
       "list_id": "901615029196",
       "qa_list_id": "901615541652",
       "folder_id": "90169709638"
@@ -173,6 +174,15 @@
       "qa_list_id": "",
       "folder_id": "",
       "aliases": ["Fuse", "FuseAI"]
+    },
+    "sunsethq": {
+      "display_name": "Sunset HQ",
+      "channel_id": "",
+      "internal_channel_id": "C0BKMCYLSSF",
+      "list_id": "",
+      "qa_list_id": "",
+      "folder_id": "",
+      "aliases": ["SunsetHQ", "Sunset"]
     }
   },
   "users": {
@@ -249,6 +259,7 @@
   "meeting_transcripts": {
     "enabled": true,
     "channel_id": "C096YRP55NV",
-    "internal_email_domains": ["pixelup.in"]
+    "internal_email_domains": ["pixelup.in", "pixeluplabs.com"],
+    "ignore_title_patterns": ["standup", "retro", "allhands", "internalsync", "huddle", "teamsync", "leadership"]
   }
 }

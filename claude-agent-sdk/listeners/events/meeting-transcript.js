@@ -48,6 +48,43 @@ function domainOf(email) {
 }
 
 /**
+ * Slack's wire format is NOT what you see in the client. Fireflies posts its
+ * header with bold labels and auto-linked emails, so `event.text` actually
+ * arrives as:
+ *
+ *   *Title:* <https://app.fireflies.ai/view/x|Acme <> PIXELUP Weekly Sync>
+ *   *Participants:* <mailto:a@acme.com|a@acme.com>, <mailto:b@pixelup.in|b@pixelup.in>
+ *
+ * Parsing that as plain text yields an empty title and no participants, which
+ * made the whole automation a silent no-op. Normalize the markup away first:
+ * unwrap mailto links to the bare address, drop URLs and the surrounding
+ * `<`/`>`/`|`, and strip bold/italic markers. Lossy by design — the title only
+ * needs to survive well enough to match a client name.
+ * @param {string} text
+ * @returns {string}
+ */
+export function normalizeSlackText(text) {
+  return (text || '')
+    .split('\n')
+    .map((line) =>
+      line
+        // <mailto:a@b.com|a@b.com> and <mailto:a@b.com> → a@b.com
+        .replace(/<mailto:([^|>]+)(?:\|[^>]*)?>/gi, '$1')
+        // Drop URLs entirely; the label text after "|" is what we want. Stop at
+        // "|" and ">" — a greedy \S+ would eat the pipe and the first word of
+        // the label, silently dropping the client name out of the title.
+        .replace(/https?:\/\/[^\s|>]+/gi, ' ')
+        // Leftover link scaffolding, including the `<>` in "Acme <> PIXELUP".
+        .replace(/[<>|]/g, ' ')
+        // Bold/italic/strike markers around labels and values.
+        .replace(/[*_~`]/g, '')
+        .replace(/[ \t]+/g, ' ')
+        .trim(),
+    )
+    .join('\n');
+}
+
+/**
  * Pull Title and Participants from a Fireflies transcript header message.
  * @param {string} text
  * @returns {{ title: string, participantEmails: string[] }}
@@ -56,15 +93,17 @@ export function parseTranscriptHeader(text) {
   let title = '';
   /** @type {string[]} */
   let participantEmails = [];
-  for (const line of (text || '').split('\n')) {
-    const titleMatch = line.match(/^\s*Title:\s*(.+)$/i);
+  for (const line of normalizeSlackText(text).split('\n')) {
+    const titleMatch = line.match(/^\s*Title\s*:\s*(.+)$/i);
     if (titleMatch) title = titleMatch[1].trim();
-    const participantsMatch = line.match(/^\s*Participants:\s*(.+)$/i);
+    const participantsMatch = line.match(/^\s*Participants\s*:\s*(.+)$/i);
     if (participantsMatch) {
       participantEmails = participantsMatch[1]
-        .split(',')
+        .split(/[,;]/)
         .map((s) => s.trim())
-        .filter((s) => s.includes('@'));
+        // Keep only things that actually look like an address, so stray words
+        // from a mangled line can't become a fake "domain".
+        .filter((s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s));
     }
   }
   return { title, participantEmails };
@@ -78,6 +117,31 @@ export function parseTranscriptHeader(text) {
  */
 export function isNotesMessage(text) {
   return /action items/i.test(text || '');
+}
+
+/**
+ * Titles that are never client calls (standups, retros, all-hands…).
+ *
+ * Both the title and the patterns are squashed to lowercase alphanumerics before
+ * comparing, so one pattern covers every spelling: `standup` matches "Daily
+ * Stand Up", "Daily Stand-Up", and "DailyStandup".
+ *
+ * The patterns live in config precisely because this needs judgement: a bare
+ * "sync" would wrongly swallow real client calls, which are named
+ * "<Client> <> PIXELUP Weekly Sync". Keep additions specific.
+ * @param {string} title
+ * @param {string[] | undefined} patterns
+ * @returns {string | null} The pattern that matched, or null.
+ */
+export function ignoredTitlePattern(title, patterns) {
+  const squash = (/** @type {string} */ s) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const haystack = squash(title || '');
+  if (!haystack) return null;
+  for (const pattern of Array.isArray(patterns) ? patterns : []) {
+    const needle = squash(pattern);
+    if (needle && haystack.includes(needle)) return pattern;
+  }
+  return null;
 }
 
 /**
@@ -167,8 +231,16 @@ export async function handleMeetingTranscript(args, injected = {}) {
     // Not actually a Fireflies transcript (no header) — ignore silently.
     if (!header.title || header.participantEmails.length === 0) return;
 
+    // Title rule first, and it WINS over the participant check: a standup with
+    // one external guest (a contractor, a candidate) is still not a client call.
+    const ignoredBy = ignoredTitlePattern(header.title, cfg.ignore_title_patterns);
+    if (ignoredBy) {
+      logger.info(`Meeting transcript ignored — title "${header.title}" matches "${ignoredBy}".`);
+      return;
+    }
+
     const internalDomains = cfg.internal_email_domains?.length ? cfg.internal_email_domains : ['pixelup.in'];
-    // Internal team meeting (standup/sync) → ignore, per the requirement.
+    // Internal team meeting (everyone on our own domains) → ignore.
     if (!hasExternalParticipant(header, internalDomains)) {
       logger.info(`Meeting transcript ignored — internal meeting "${header.title}".`);
       return;
