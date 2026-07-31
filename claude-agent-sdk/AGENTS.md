@@ -43,6 +43,9 @@ npm install          # Install dependencies
 npm start            # Start the app
 npm run auth:clickup    # One-time OAuth flow for the ClickUp MCP server
 npm run auth:fireflies  # One-time OAuth flow for the Fireflies MCP server
+npm run brief:coverage  # Which internal channels can the bot read? (free — no history reads, no model call)
+npm run brief           # Build the founder brief and print it (sends nothing)
+npm run brief -- --dm   # ...and DM it to daily_brief.recipient_slack_id
 npm run lint         # Biome lint and format check
 npm run lint:fix     # Auto-fix lint and format issues
 npm run check        # Type check JavaScript with tsc (checkJs)
@@ -79,7 +82,7 @@ npm test             # Run all tests
 | `integrations/` | MCP server config (`mcp-servers.js`), OAuth provider/token store (`mcp-auth.js`), executor's MCP write client (`clickup-mcp.js`), document text extraction (`document-reader.js`), tl;dv read client (`tldv.js`) |
 | `scripts/` | `authorize-mcp.js` — one-time interactive OAuth flow (also prints the server's real tool names) |
 | `listeners/` | Bolt listeners: `events/`, `actions/`, `shortcuts/`, `views/` |
-| `schedules/` | Tue/Fri client-update draft scheduler |
+| `schedules/` | Tue/Fri client-update draft scheduler; weekday founder brief (`daily-brief.js`) |
 | `thread-context/` | `SessionStore` for Claude session IDs |
 
 ### Agent Layer

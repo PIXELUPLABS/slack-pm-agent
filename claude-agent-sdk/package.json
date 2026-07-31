@@ -8,6 +8,8 @@
     "auth:fireflies": "node scripts/authorize-mcp.js fireflies",
     "sync:channels": "node scripts/sync-channel-ids.js",
     "recap:dryrun": "node scripts/meeting-recap-dryrun.js",
+    "brief": "node scripts/daily-brief.js",
+    "brief:coverage": "node scripts/daily-brief.js --coverage",
     "check": "npx tsc --checkJs --noEmit --skipLibCheck --esModuleInterop --target esnext --module nodenext --moduleResolution nodenext app.js",
     "start": "node app.js",
     "lint": "npx @biomejs/biome check .",

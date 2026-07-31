@@ -256,6 +256,24 @@
     "minute": 0,
     "timezone": "Asia/Kolkata"
   },
+  "daily_brief": {
+    "enabled": false,
+    "recipient_slack_id": "U09RKSU0QSX",
+    "days": ["monday", "tuesday", "wednesday", "thursday", "friday"],
+    "hour": 9,
+    "minute": 0,
+    "timezone": "Asia/Kolkata",
+    "lookback_hours": 24,
+    "monday_lookback_hours": 72,
+    "thread_scan_hours": 168,
+    "internal_channels": [
+      "pixelup-internal",
+      "motion-design",
+      "pixelup-website",
+      "daily-updates",
+      "meeting-transcripts"
+    ]
+  },
   "meeting_transcripts": {
     "enabled": true,
     "channel_id": "C096YRP55NV",

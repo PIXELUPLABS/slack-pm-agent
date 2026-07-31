@@ -46,6 +46,7 @@ import { isPlaceholderId, resetResolverCache } from './resolver.js';
  * @property {Record<string, InternalListConfig>} [internal_lists] - Non-client ClickUp lists (e.g. Automation Ideas in Operations) the agent may log to.
  * @property {{ drafts_channel_id: string, conversation_channel_ids?: string[] }} channels
  * @property {{ enabled: boolean, days: string[], hour: number, minute: number, timezone: string }} client_updates
+ * @property {{ enabled?: boolean, recipient_slack_id?: string, days?: string[], hour?: number, minute?: number, timezone?: string, lookback_hours?: number, monday_lookback_hours?: number, thread_scan_hours?: number, internal_channels?: string[] }} [daily_brief] - Morning founder brief from internal channels.
  * @property {{ enabled?: boolean, channel_id: string, internal_email_domains?: string[], ignore_title_patterns?: string[] }} [meeting_transcripts] - Fireflies transcript → internal recap automation.
  */
 
@@ -121,10 +122,52 @@ export function validateConventions(data) {
     }
   }
 
+  const validDays = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+
   if (data.client_updates) {
-    const validDays = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
     for (const day of data.client_updates.days || []) {
       if (!validDays.includes(day)) problems.push(`client_updates.days contains invalid day "${day}"`);
+    }
+  }
+
+  if (data.daily_brief !== undefined) {
+    const db = data.daily_brief;
+    if (!db || typeof db !== 'object') {
+      problems.push('daily_brief must be an object when present');
+    } else {
+      if (db.enabled !== undefined && typeof db.enabled !== 'boolean') {
+        problems.push('daily_brief.enabled must be a boolean when present');
+      }
+      if (db.recipient_slack_id !== undefined && typeof db.recipient_slack_id !== 'string') {
+        problems.push('daily_brief.recipient_slack_id must be a string when present');
+      }
+      if (db.days !== undefined && !Array.isArray(db.days)) {
+        problems.push('daily_brief.days must be an array when present');
+      } else {
+        for (const day of db.days || []) {
+          if (!validDays.includes(day)) problems.push(`daily_brief.days contains invalid day "${day}"`);
+        }
+      }
+      for (const field of ['hour', 'minute', 'lookback_hours', 'monday_lookback_hours', 'thread_scan_hours']) {
+        const value = db[field];
+        if (value !== undefined && (typeof value !== 'number' || !Number.isFinite(value) || value < 0)) {
+          problems.push(`daily_brief.${field} must be a non-negative number when present`);
+        }
+      }
+      if (db.timezone !== undefined && typeof db.timezone !== 'string') {
+        problems.push('daily_brief.timezone must be a string when present');
+      }
+      if (
+        db.internal_channels !== undefined &&
+        (!Array.isArray(db.internal_channels) ||
+          db.internal_channels.some((/** @type {any} */ n) => typeof n !== 'string'))
+      ) {
+        problems.push('daily_brief.internal_channels must be an array of channel-name strings when present');
+      }
+      // The scheduler needs somewhere to send it; the CLI can be told at run time.
+      if (db.enabled === true && !db.recipient_slack_id) {
+        problems.push('daily_brief.recipient_slack_id is required when daily_brief.enabled is true');
+      }
     }
   }
 
