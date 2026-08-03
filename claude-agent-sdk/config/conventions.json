@@ -192,6 +192,14 @@
       "list_id": "",
       "qa_list_id": "",
       "folder_id": ""
+    },
+    "varick": {
+      "display_name": "Varick",
+      "channel_id": "",
+      "internal_channel_id": "C0BMD078GHK",
+      "list_id": "",
+      "qa_list_id": "",
+      "folder_id": ""
     }
   },
   "users": {
