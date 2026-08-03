@@ -44,7 +44,10 @@ npm start            # Start the app
 npm run auth:clickup    # One-time OAuth flow for the ClickUp MCP server
 npm run auth:fireflies  # One-time OAuth flow for the Fireflies MCP server
 npm run brief:coverage  # Which internal channels can the bot read? (free — no history reads, no model call)
-npm run brief           # Build the brief and print it (sends nothing)
+npm run brief           # Build today's brief and print it (sends nothing)
+npm run brief -- --weekly   # Build Monday's weekly review on any day (one model call per active channel, plus one)
+npm run brief -- --daily    # Force the daily brief, even on the weekly review day
+npm run brief -- --weekly --digest   # ...and print the per-channel summaries handed to the reduce call
 npm run brief -- --dm   # ...and DM it to daily_brief.recipient_slack_id
 npm run brief -- --dm U09RKSU0QSX   # preview someone else's brief; "Needs you" stays anchored on the configured recipient
 npm run lint         # Biome lint and format check
@@ -83,7 +86,7 @@ npm test             # Run all tests
 | `integrations/` | MCP server config (`mcp-servers.js`), OAuth provider/token store (`mcp-auth.js`), executor's MCP write client (`clickup-mcp.js`), document text extraction (`document-reader.js`), tl;dv read client (`tldv.js`) |
 | `scripts/` | `authorize-mcp.js` — one-time interactive OAuth flow (also prints the server's real tool names) |
 | `listeners/` | Bolt listeners: `events/`, `actions/`, `shortcuts/`, `views/` |
-| `schedules/` | Tue/Fri client-update draft scheduler; weekday founder brief (`daily-brief.js`) |
+| `schedules/` | Tue/Fri client-update draft scheduler; weekday founder brief and Monday weekly review (`daily-brief.js`, two modes off one pipeline) |
 | `thread-context/` | `SessionStore` for Claude session IDs |
 
 ### Agent Layer

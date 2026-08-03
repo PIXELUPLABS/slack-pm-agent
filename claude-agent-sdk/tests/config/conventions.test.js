@@ -89,6 +89,47 @@ describe('validateConventions', () => {
     data.clickup.default_priority = 'blocker';
     assert.throws(() => validateConventions(data), /default_priority/);
   });
+
+  it('accepts a valid weekly_review block', () => {
+    const data = /** @type {any} */ (validData());
+    data.daily_brief = {
+      enabled: true,
+      recipient_slack_id: 'U0LEAD',
+      days: ['monday', 'tuesday'],
+      weekly_review: { enabled: true, day: 'monday', lookback_hours: 168, thread_scan_hours: 336 },
+    };
+    assert.deepStrictEqual(validateConventions(data), data);
+  });
+
+  it('rejects a weekly_review day the schedule never fires on', () => {
+    const data = /** @type {any} */ (validData());
+    data.daily_brief = {
+      enabled: true,
+      recipient_slack_id: 'U0LEAD',
+      days: ['tuesday', 'wednesday'],
+      weekly_review: { enabled: true, day: 'monday' },
+    };
+    assert.throws(() => validateConventions(data), /is not in daily_brief\.days, so it would never run/);
+  });
+
+  it('rejects a weekly thread scan shorter than the window it briefs on', () => {
+    const data = /** @type {any} */ (validData());
+    data.daily_brief = {
+      recipient_slack_id: 'U0LEAD',
+      weekly_review: { enabled: true, lookback_hours: 168, thread_scan_hours: 24 },
+    };
+    assert.throws(() => validateConventions(data), /thread_scan_hours must be >= its lookback_hours/);
+  });
+
+  it('rejects an invalid weekly_review day and a non-numeric window', () => {
+    const bad = /** @type {any} */ (validData());
+    bad.daily_brief = { weekly_review: { day: 'someday' } };
+    assert.throws(() => validateConventions(bad), /weekly_review\.day is not a valid day/);
+
+    const worse = /** @type {any} */ (validData());
+    worse.daily_brief = { weekly_review: { lookback_hours: -1 } };
+    assert.throws(() => validateConventions(worse), /weekly_review\.lookback_hours must be a non-negative number/);
+  });
 });
 
 describe('loadConventions', () => {

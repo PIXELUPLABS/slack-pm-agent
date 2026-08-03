@@ -73,6 +73,7 @@
     "anoncoin": {
       "display_name": "Anoncoin",
       "channel_id": "C_TODO_ANONCOIN",
+      "internal_channel_id": "C08HBRZ8FNE",
       "list_id": "901614298591",
       "qa_list_id": "",
       "folder_id": "90169133062"
@@ -274,6 +275,12 @@
     "lookback_hours": 24,
     "monday_lookback_hours": 72,
     "thread_scan_hours": 168,
+    "weekly_review": {
+      "enabled": true,
+      "day": "monday",
+      "lookback_hours": 168,
+      "thread_scan_hours": 336
+    },
     "internal_channels": [
       "pixelup-internal",
       "motion-design",

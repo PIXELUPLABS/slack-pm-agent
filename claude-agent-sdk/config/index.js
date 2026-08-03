@@ -46,7 +46,7 @@ import { isPlaceholderId, resetResolverCache } from './resolver.js';
  * @property {Record<string, InternalListConfig>} [internal_lists] - Non-client ClickUp lists (e.g. Automation Ideas in Operations) the agent may log to.
  * @property {{ drafts_channel_id: string, conversation_channel_ids?: string[] }} channels
  * @property {{ enabled: boolean, days: string[], hour: number, minute: number, timezone: string }} client_updates
- * @property {{ enabled?: boolean, recipient_slack_id?: string, days?: string[], hour?: number, minute?: number, timezone?: string, lookback_hours?: number, monday_lookback_hours?: number, thread_scan_hours?: number, internal_channels?: string[] }} [daily_brief] - Morning founder brief from internal channels.
+ * @property {{ enabled?: boolean, recipient_slack_id?: string, days?: string[], hour?: number, minute?: number, timezone?: string, lookback_hours?: number, monday_lookback_hours?: number, thread_scan_hours?: number, internal_channels?: string[], weekly_review?: { enabled?: boolean, day?: string, lookback_hours?: number, thread_scan_hours?: number } }} [daily_brief] - Morning founder brief from internal channels; `weekly_review` turns one weekday into a week-in-review instead.
  * @property {{ enabled?: boolean, channel_id: string, internal_email_domains?: string[], ignore_title_patterns?: string[] }} [meeting_transcripts] - Fireflies transcript → internal recap automation.
  */
 
@@ -163,6 +163,39 @@ export function validateConventions(data) {
           db.internal_channels.some((/** @type {any} */ n) => typeof n !== 'string'))
       ) {
         problems.push('daily_brief.internal_channels must be an array of channel-name strings when present');
+      }
+      if (db.weekly_review !== undefined) {
+        const wr = db.weekly_review;
+        if (!wr || typeof wr !== 'object') {
+          problems.push('daily_brief.weekly_review must be an object when present');
+        } else {
+          if (wr.enabled !== undefined && typeof wr.enabled !== 'boolean') {
+            problems.push('daily_brief.weekly_review.enabled must be a boolean when present');
+          }
+          if (wr.day !== undefined && !validDays.includes(wr.day)) {
+            problems.push(`daily_brief.weekly_review.day is not a valid day: "${wr.day}"`);
+          }
+          for (const field of ['lookback_hours', 'thread_scan_hours']) {
+            const value = wr[field];
+            if (value !== undefined && (typeof value !== 'number' || !Number.isFinite(value) || value < 0)) {
+              problems.push(`daily_brief.weekly_review.${field} must be a non-negative number when present`);
+            }
+          }
+          // A review day the schedule never fires on would silently never run.
+          const day = wr.day || 'monday';
+          if (wr.enabled === true && db.days !== undefined && Array.isArray(db.days) && !db.days.includes(day)) {
+            problems.push(`daily_brief.weekly_review.day "${day}" is not in daily_brief.days, so it would never run`);
+          }
+          // The thread scan has to reach further back than the window it briefs on,
+          // or a thread whose parent predates the week is invisible.
+          if (
+            typeof wr.thread_scan_hours === 'number' &&
+            typeof wr.lookback_hours === 'number' &&
+            wr.thread_scan_hours < wr.lookback_hours
+          ) {
+            problems.push('daily_brief.weekly_review.thread_scan_hours must be >= its lookback_hours');
+          }
+        }
       }
       // The scheduler needs somewhere to send it; the CLI can be told at run time.
       if (db.enabled === true && !db.recipient_slack_id) {

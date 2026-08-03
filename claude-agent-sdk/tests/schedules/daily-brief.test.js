@@ -3,13 +3,18 @@ import { describe, it, mock } from 'node:test';
 
 import {
   buildDigest,
+  buildWeeklyDigest,
+  compactByDay,
   deliverBrief,
   findDirectMentions,
   gatherChannelActivity,
   isSubstantiveMessage,
   lookbackHoursFor,
+  resolveMode,
   runDailyBrief,
   selectInternalChannels,
+  summarizeChannels,
+  windowHoursFor,
   windowStart,
 } from '../../schedules/daily-brief.js';
 
@@ -224,6 +229,125 @@ describe('lookbackHoursFor', () => {
 describe('windowStart', () => {
   it('subtracts the lookback from now', () => {
     assert.strictEqual(windowStart(new Date('2026-07-31T09:00:00Z'), 24), '2026-07-30T09:00:00.000Z');
+  });
+});
+
+describe('resolveMode', () => {
+  const weekly = { weekly_review: { enabled: true, day: 'monday' } };
+
+  it('gives Monday the weekly review and the rest of the week the daily brief', () => {
+    assert.strictEqual(resolveMode('monday', weekly), 'weekly');
+    for (const day of ['tuesday', 'wednesday', 'thursday', 'friday']) {
+      assert.strictEqual(resolveMode(day, weekly), 'daily');
+    }
+  });
+
+  it('stays daily when weekly_review is absent, so old config is unchanged', () => {
+    assert.strictEqual(resolveMode('monday', {}), 'daily');
+    assert.strictEqual(resolveMode('monday', undefined), 'daily');
+  });
+
+  it('reverts Monday to the daily brief when the review is disabled', () => {
+    assert.strictEqual(resolveMode('monday', { weekly_review: { enabled: false, day: 'monday' } }), 'daily');
+  });
+
+  it('honours a review day other than Monday', () => {
+    assert.strictEqual(resolveMode('friday', { weekly_review: { enabled: true, day: 'friday' } }), 'weekly');
+    assert.strictEqual(resolveMode('monday', { weekly_review: { enabled: true, day: 'friday' } }), 'daily');
+  });
+});
+
+describe('windowHoursFor', () => {
+  const cfg = {
+    lookback_hours: 24,
+    monday_lookback_hours: 72,
+    thread_scan_hours: 168,
+    weekly_review: { enabled: true, day: 'monday', lookback_hours: 168, thread_scan_hours: 336 },
+  };
+
+  it('covers a trailing week on the review day', () => {
+    assert.deepStrictEqual(windowHoursFor('monday', cfg), { mode: 'weekly', lookbackHours: 168, scanHours: 336 });
+  });
+
+  it('covers 24h on a normal weekday', () => {
+    assert.deepStrictEqual(windowHoursFor('wednesday', cfg), { mode: 'daily', lookbackHours: 24, scanHours: 168 });
+  });
+
+  it('falls back to the weekend window on Monday when the review is off', () => {
+    const off = { ...cfg, weekly_review: { ...cfg.weekly_review, enabled: false } };
+    assert.deepStrictEqual(windowHoursFor('monday', off), { mode: 'daily', lookbackHours: 72, scanHours: 168 });
+  });
+
+  it('scans further back than it briefs on, in both modes', () => {
+    for (const day of ['monday', 'wednesday']) {
+      const w = windowHoursFor(day, cfg);
+      assert.ok(w.scanHours >= w.lookbackHours, `${day}: scan ${w.scanHours} < lookback ${w.lookbackHours}`);
+    }
+  });
+
+  it('brings the weekly window along when a mode is forced off-day', () => {
+    // Previewing the review on a Tuesday must not summarize 24h and call it a week.
+    assert.deepStrictEqual(windowHoursFor('tuesday', cfg, 'weekly'), {
+      mode: 'weekly',
+      lookbackHours: 168,
+      scanHours: 336,
+    });
+    assert.deepStrictEqual(windowHoursFor('monday', cfg, 'daily'), {
+      mode: 'daily',
+      lookbackHours: 72,
+      scanHours: 168,
+    });
+  });
+
+  it('defaults the weekly window when weekly_review omits the hours', () => {
+    const bare = { weekly_review: { enabled: true } };
+    assert.deepStrictEqual(windowHoursFor('monday', bare), { mode: 'weekly', lookbackHours: 168, scanHours: 336 });
+  });
+});
+
+describe('compactByDay', () => {
+  /** @param {string} iso @param {string} text */
+  const msg = (iso, text) => ({ type: 'message', user: 'U1', ts: String(Date.parse(iso) / 1000), text });
+
+  it('groups a week under day headings, oldest day first', () => {
+    const text = compactByDay(
+      [
+        msg('2026-07-27T10:00:00Z', 'monday work'),
+        msg('2026-07-29T10:00:00Z', 'wednesday work'),
+        msg('2026-07-28T10:00:00Z', 'tuesday work'),
+      ],
+      { maxChars: 5000, timezone: 'UTC' },
+    );
+    assert.match(text, /Monday 2026-07-27/);
+    assert.match(text, /Tuesday 2026-07-28/);
+    assert.match(text, /Wednesday 2026-07-29/);
+    assert.ok(text.indexOf('Monday 2026-07-27') < text.indexOf('Wednesday 2026-07-29'), 'days out of order');
+  });
+
+  it('buckets by the configured timezone, not UTC', () => {
+    // 23:00 UTC Monday is already Tuesday 04:30 in Kolkata.
+    const text = compactByDay([msg('2026-07-27T23:00:00Z', 'late')], { maxChars: 5000, timezone: 'Asia/Kolkata' });
+    assert.match(text, /Tuesday 2026-07-28/);
+  });
+
+  it('drops whole early days and says how many when over budget', () => {
+    const long = 'x'.repeat(400);
+    const text = compactByDay(
+      [msg('2026-07-27T10:00:00Z', long), msg('2026-07-28T10:00:00Z', long), msg('2026-07-29T10:00:00Z', long)],
+      { maxChars: 700, timezone: 'UTC' },
+    );
+    assert.match(text, /earlier day\(s\) of this window omitted/);
+    // The newest day survives; that is the point of filling newest-first.
+    assert.match(text, /Wednesday 2026-07-29/);
+  });
+
+  it('survives a message with an unparseable timestamp', () => {
+    const text = compactByDay(
+      [{ type: 'message', user: 'U1', ts: 'nonsense', text: 'junk' }, msg('2026-07-29T10:00:00Z', 'real')],
+      { maxChars: 5000, timezone: 'UTC' },
+    );
+    assert.match(text, /Wednesday 2026-07-29/);
+    assert.doesNotMatch(text, /junk/);
   });
 });
 
@@ -767,6 +891,184 @@ describe('buildDigest', () => {
   });
 });
 
+describe('summarizeChannels', () => {
+  /** @param {string} text */
+  const fakeQuery = (text) =>
+    async function* () {
+      yield { type: 'assistant', message: { content: [{ type: 'text', text }] } };
+    };
+
+  /** @param {any} over */
+  const channel = (over = {}) => ({
+    id: 'C1',
+    name: 'acme-internal',
+    clientKey: 'acme',
+    isMember: true,
+    source: 'config-internal',
+    messageCount: 12,
+    activeDays: 3,
+    text: '— Monday 2026-07-27 —\n[ts:1] <@U1>: shipped the logo',
+    ...over,
+  });
+
+  const conventions = conventionsOf({ clients: { acme: { display_name: 'Acme Corp' } } });
+
+  it('summarizes each channel once and labels it with the client', async () => {
+    const queryFn = mock.fn(fakeQuery('STATE: fine\nMOVED: - shipped\nBLOCKED: none\nOPEN: none'));
+    const out = await summarizeChannels({
+      active: /** @type {any} */ ([channel(), channel({ id: 'C2', name: 'pixelup-internal', clientKey: null })]),
+      conventions: /** @type {any} */ (conventions),
+      query: /** @type {any} */ (queryFn),
+    });
+
+    assert.strictEqual(queryFn.mock.callCount(), 2);
+    assert.strictEqual(out.length, 2);
+    assert.strictEqual(out[0].label, '#acme-internal (client: Acme Corp)');
+    // A team channel is not labelled as a client's.
+    assert.strictEqual(out[1].label, '#pixelup-internal');
+    assert.match(out[0].summary, /STATE: fine/);
+    assert.strictEqual(out[0].failed, false);
+  });
+
+  it('gets the channel text as untrusted data, with no tools', async () => {
+    const queryFn = mock.fn(fakeQuery('STATE: fine'));
+    await summarizeChannels({
+      active: /** @type {any} */ ([channel()]),
+      conventions: /** @type {any} */ (conventions),
+      query: /** @type {any} */ (queryFn),
+    });
+    const call = /** @type {any} */ (queryFn.mock.calls[0].arguments[0]);
+    assert.match(call.prompt, /shipped the logo/);
+    assert.match(call.prompt, /untrusted/i);
+    assert.deepStrictEqual(call.options.allowedTools, []);
+    assert.strictEqual(call.options.maxTurns, 1);
+  });
+
+  it('falls back to raw messages when one channel fails, keeping the rest', async () => {
+    let n = 0;
+    const queryFn = () => {
+      n++;
+      if (n === 1) throw new Error('model exploded');
+      return fakeQuery('STATE: fine')();
+    };
+    const errors = [];
+    const out = await summarizeChannels({
+      active: /** @type {any} */ ([channel(), channel({ id: 'C2', name: 'beta-internal', clientKey: null })]),
+      conventions: /** @type {any} */ (conventions),
+      query: /** @type {any} */ (queryFn),
+      logger: { info: () => {}, error: (/** @type {string} */ m) => errors.push(m) },
+    });
+
+    assert.strictEqual(out.length, 2);
+    const failed = out.find((s) => s.failed);
+    assert.ok(failed, 'expected one failed summary');
+    assert.match(/** @type {any} */ (failed).summary, /Summary unavailable/);
+    // The channel is still represented rather than silently missing.
+    assert.match(/** @type {any} */ (failed).summary, /shipped the logo/);
+    assert.strictEqual(out.filter((s) => !s.failed).length, 1);
+    assert.strictEqual(errors.length, 1);
+  });
+
+  it('treats an empty model response as a failure rather than an empty section', async () => {
+    const out = await summarizeChannels({
+      active: /** @type {any} */ ([channel()]),
+      conventions: /** @type {any} */ (conventions),
+      query: /** @type {any} */ (fakeQuery('   ')),
+      logger: { info: () => {}, error: () => {} },
+    });
+    assert.strictEqual(out[0].failed, true);
+  });
+});
+
+describe('buildWeeklyDigest', () => {
+  /** @param {any} over */
+  const summaryOf = (over = {}) => ({
+    channel: {
+      id: 'C1',
+      name: 'acme-internal',
+      clientKey: 'acme',
+      isMember: true,
+      source: 'config-internal',
+      messageCount: 40,
+      activeDays: 4,
+      ...(over.channel || {}),
+    },
+    label: over.label || '#acme-internal (client: Acme Corp)',
+    summary: over.summary || 'STATE: on track\nMOVED: - shipped Tuesday\nBLOCKED: none\nOPEN: none',
+    failed: over.failed ?? false,
+  });
+
+  const conventions = conventionsOf({
+    clients: { acme: { display_name: 'Acme Corp' }, sully: { display_name: 'Sully' } },
+  });
+
+  it('marks itself a weekly review and carries each summary', () => {
+    const { text, includedChannels } = buildWeeklyDigest({
+      summaries: /** @type {any} */ ([summaryOf()]),
+      conventions: /** @type {any} */ (conventions),
+      since: '2026-07-27T05:27:00Z',
+      until: '2026-08-03T05:27:00Z',
+    });
+    assert.match(text, /WEEKLY REVIEW/);
+    assert.match(text, /last 7 days/);
+    assert.match(text, /40 message\(s\) this week, active on 4 day\(s\)/);
+    assert.match(text, /STATE: on track/);
+    assert.deepStrictEqual(includedChannels, ['#acme-internal']);
+  });
+
+  it('names projects that were silent all week', () => {
+    const { text } = buildWeeklyDigest({
+      summaries: /** @type {any} */ ([summaryOf()]),
+      quiet: /** @type {any} */ ([{ id: 'C9', name: 'sully-internal', clientKey: 'sully', isMember: true }]),
+      conventions: /** @type {any} */ (conventions),
+      since: 'a',
+      until: 'b',
+    });
+    assert.match(text, /NO activity ALL WEEK/);
+    assert.match(text, /Sully/);
+  });
+
+  it('reports which summaries failed', () => {
+    const { failedSummaries } = buildWeeklyDigest({
+      summaries: /** @type {any} */ ([
+        summaryOf(),
+        summaryOf({ channel: { id: 'C2', name: 'beta-internal', clientKey: null }, failed: true }),
+      ]),
+      conventions: /** @type {any} */ (conventions),
+      since: 'a',
+      until: 'b',
+    });
+    assert.deepStrictEqual(failedSummaries, ['#beta-internal']);
+  });
+
+  it('drops channels over the total budget and says which', () => {
+    const big = 'y'.repeat(3000);
+    const { droppedChannels, includedChannels } = buildWeeklyDigest({
+      summaries: /** @type {any} */ ([
+        summaryOf({ summary: big, channel: { messageCount: 100 } }),
+        summaryOf({ summary: big, channel: { id: 'C2', name: 'beta-internal', clientKey: null, messageCount: 10 } }),
+      ]),
+      conventions: /** @type {any} */ (conventions),
+      since: 'a',
+      until: 'b',
+      totalMaxChars: 3500,
+    });
+    assert.deepStrictEqual(includedChannels, ['#acme-internal']);
+    assert.deepStrictEqual(droppedChannels, ['#beta-internal']);
+  });
+
+  it('has no mention block — "Needs you" is a daily-brief concept', () => {
+    const { text } = buildWeeklyDigest({
+      summaries: /** @type {any} */ ([summaryOf()]),
+      conventions: /** @type {any} */ (conventions),
+      since: 'a',
+      until: 'b',
+    });
+    assert.doesNotMatch(text, /TAGGED/);
+    assert.doesNotMatch(text, /Needs you|part 2/i);
+  });
+});
+
 describe('deliverBrief', () => {
   it('posts to the DM conversation Slack opens', async () => {
     const client = {
@@ -1099,5 +1401,219 @@ describe('runDailyBrief', () => {
       ['#design-engineering-internal'],
     );
     assert.doesNotMatch(result.brief, /Couldn't read/);
+  });
+
+  describe('weekly review', () => {
+    const weeklyConventions = conventionsOf({
+      clients: { acme: { display_name: 'Acme Corp', internal_channel_id: 'C1' } },
+      daily_brief: {
+        timezone: 'UTC',
+        lookback_hours: 24,
+        weekly_review: { enabled: true, day: 'monday', lookback_hours: 168, thread_scan_hours: 336 },
+      },
+    });
+
+    /** A ts a few days back — inside the weekly window, outside the daily one. */
+    const daysAgoTs = (/** @type {number} */ n) => String(Math.floor(Date.now() / 1000) - n * 24 * 3600);
+
+    /**
+     * Distinguishes the map calls from the reduce call: the per-channel prompt asks
+     * for the four labelled lines, the reduce prompt asks for the review.
+     * @param {any} call
+     */
+    const isReduceCall = (call) => /weekly review now/.test(call.arguments[0].prompt);
+
+    it('maps per channel then reduces, and says it is a weekly review', async () => {
+      const client = slackClient({
+        channels: [
+          { id: 'C1', name: 'acme-internal', is_member: true },
+          { id: 'C3', name: 'beta-internal', is_member: true },
+        ],
+        history: {
+          C1: [{ type: 'message', user: 'U1', ts: daysAgoTs(5), text: 'logo shipped' }],
+          C3: [{ type: 'message', user: 'U2', ts: daysAgoTs(3), text: 'kickoff done' }],
+        },
+      });
+      const queryFn = mock.fn(fakeQuery('*:one: Last week*\n• *Acme* — shipped.'));
+      const result = await runDailyBrief({
+        client: /** @type {any} */ (client),
+        conventions: /** @type {any} */ (
+          conventionsOf({
+            clients: {
+              acme: { display_name: 'Acme Corp', internal_channel_id: 'C1' },
+              beta: { display_name: 'Beta', internal_channel_id: 'C3' },
+            },
+            daily_brief: weeklyConventions.daily_brief,
+          })
+        ),
+        recipientId: 'U1',
+        mode: 'weekly',
+        deliver: false,
+        query: /** @type {any} */ (queryFn),
+      });
+
+      assert.strictEqual(result.mode, 'weekly');
+      // Two channels → two map calls, plus one reduce.
+      assert.strictEqual(queryFn.mock.callCount(), 3);
+      assert.strictEqual(queryFn.mock.calls.filter(isReduceCall).length, 1);
+      assert.match(result.digest, /WEEKLY REVIEW/);
+      // Activity 5 days old is in the week's window but would miss a 24h one.
+      assert.strictEqual(result.active.length, 2);
+    });
+
+    it('reduces from the summaries, not the raw messages', async () => {
+      const client = slackClient({
+        channels: [{ id: 'C1', name: 'acme-internal', is_member: true }],
+        history: { C1: [{ type: 'message', user: 'U1', ts: daysAgoTs(4), text: 'SECRET_RAW_TOKEN' }] },
+      });
+      const queryFn = mock.fn(fakeQuery('STATE: summarized, no raw text here'));
+      const result = await runDailyBrief({
+        client: /** @type {any} */ (client),
+        conventions: /** @type {any} */ (weeklyConventions),
+        recipientId: 'U1',
+        mode: 'weekly',
+        deliver: false,
+        query: /** @type {any} */ (queryFn),
+      });
+
+      const reduce = queryFn.mock.calls.find(isReduceCall);
+      assert.ok(reduce, 'expected a reduce call');
+      // The map stage saw the raw messages; the reduce stage sees only summaries.
+      assert.match(/** @type {any} */ (reduce).arguments[0].prompt, /STATE: summarized/);
+      assert.doesNotMatch(/** @type {any} */ (reduce).arguments[0].prompt, /SECRET_RAW_TOKEN/);
+      assert.doesNotMatch(result.digest, /SECRET_RAW_TOKEN/);
+    });
+
+    it('uses day headings in the text handed to the map stage', async () => {
+      const client = slackClient({
+        channels: [{ id: 'C1', name: 'acme-internal', is_member: true }],
+        history: {
+          C1: [
+            { type: 'message', user: 'U1', ts: daysAgoTs(5), text: 'early' },
+            { type: 'message', user: 'U1', ts: daysAgoTs(1), text: 'late' },
+          ],
+        },
+      });
+      const queryFn = mock.fn(fakeQuery('STATE: fine'));
+      await runDailyBrief({
+        client: /** @type {any} */ (client),
+        conventions: /** @type {any} */ (weeklyConventions),
+        recipientId: 'U1',
+        mode: 'weekly',
+        deliver: false,
+        query: /** @type {any} */ (queryFn),
+      });
+      const map = queryFn.mock.calls.find((c) => !isReduceCall(c));
+      assert.match(/** @type {any} */ (map).arguments[0].prompt, /— \w+day \d{4}-\d{2}-\d{2} —/);
+    });
+
+    it('collects no mentions and puts no "Needs you" material in the digest', async () => {
+      const client = slackClient({
+        channels: [{ id: 'C1', name: 'acme-internal', is_member: true }],
+        history: {
+          C1: [
+            // Would be an open mention in daily mode — must not surface weekly.
+            { type: 'message', user: 'U2', ts: daysAgoTs(6), text: '<@U1> need your call on this' },
+            { type: 'message', user: 'U2', ts: daysAgoTs(2), text: 'unrelated chatter' },
+          ],
+        },
+      });
+      const result = await runDailyBrief({
+        client: /** @type {any} */ (client),
+        conventions: /** @type {any} */ (weeklyConventions),
+        recipientId: 'U1',
+        mode: 'weekly',
+        deliver: false,
+        query: /** @type {any} */ (fakeQuery('review body')),
+      });
+
+      assert.deepStrictEqual(result.mentions, []);
+      assert.doesNotMatch(result.digest, /TAGGED/);
+      // The message itself still reaches the map stage as project activity.
+      assert.strictEqual(result.active.length, 1);
+    });
+
+    it('still collects mentions on the daily path with the same data', async () => {
+      const client = slackClient({
+        channels: [{ id: 'C1', name: 'acme-internal', is_member: true }],
+        history: { C1: [{ type: 'message', user: 'U2', ts: recentTs(), text: '<@U1> need your call on this' }] },
+      });
+      const result = await runDailyBrief({
+        client: /** @type {any} */ (client),
+        conventions: /** @type {any} */ (weeklyConventions),
+        recipientId: 'U1',
+        mode: 'daily',
+        deliver: false,
+        query: /** @type {any} */ (fakeQuery('brief body')),
+      });
+
+      assert.strictEqual(result.mentions.length, 1);
+      assert.match(result.digest, /TAGGED ARJUN DIRECTLY/);
+    });
+
+    it('sends a weekly no-activity note without calling the model', async () => {
+      const client = slackClient({
+        channels: [{ id: 'C1', name: 'acme-internal', is_member: true }],
+        history: { C1: [] },
+      });
+      const queryFn = mock.fn(fakeQuery('should not run'));
+      const result = await runDailyBrief({
+        client: /** @type {any} */ (client),
+        conventions: /** @type {any} */ (weeklyConventions),
+        recipientId: 'U1',
+        mode: 'weekly',
+        deliver: true,
+        query: /** @type {any} */ (queryFn),
+      });
+
+      assert.strictEqual(queryFn.mock.callCount(), 0);
+      assert.match(result.brief, /Weekly review/);
+      assert.match(result.brief, /last week/);
+      assert.strictEqual(result.deliveredTo, 'D1');
+    });
+
+    it('footnotes a channel whose summary failed', async () => {
+      const client = slackClient({
+        channels: [{ id: 'C1', name: 'acme-internal', is_member: true }],
+        history: { C1: [{ type: 'message', user: 'U1', ts: daysAgoTs(3), text: 'work' }] },
+      });
+      let n = 0;
+      const queryFn = () => {
+        n++;
+        if (n === 1) throw new Error('map failed');
+        return fakeQuery('review body')();
+      };
+      const result = await runDailyBrief({
+        client: /** @type {any} */ (client),
+        conventions: /** @type {any} */ (weeklyConventions),
+        recipientId: 'U1',
+        mode: 'weekly',
+        deliver: false,
+        query: /** @type {any} */ (queryFn),
+        logger: { info: () => {}, error: () => {} },
+      });
+      assert.match(result.brief, /Summarizing failed for #acme-internal/);
+    });
+
+    it('takes the daily path with no map stage when the mode is daily', async () => {
+      const client = slackClient({
+        channels: [{ id: 'C1', name: 'acme-internal', is_member: true }],
+        history: { C1: [{ type: 'message', user: 'U1', ts: recentTs(), text: 'today only' }] },
+      });
+      const queryFn = mock.fn(fakeQuery('brief body'));
+      const result = await runDailyBrief({
+        client: /** @type {any} */ (client),
+        conventions: /** @type {any} */ (weeklyConventions),
+        recipientId: 'U1',
+        mode: 'daily',
+        deliver: false,
+        query: /** @type {any} */ (queryFn),
+      });
+
+      assert.strictEqual(result.mode, 'daily');
+      // One write-up call only — no per-channel summaries.
+      assert.strictEqual(queryFn.mock.callCount(), 1);
+      assert.doesNotMatch(result.digest, /WEEKLY REVIEW/);
+    });
   });
 });

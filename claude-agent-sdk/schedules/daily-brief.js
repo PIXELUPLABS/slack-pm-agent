@@ -6,13 +6,29 @@ import { classifyChannelName, isPlaceholderId } from '../config/resolver.js';
 import { shouldRun, zonedParts } from './client-updates.js';
 
 /**
- * Morning brief for the founder, from INTERNAL channels only.
+ * Morning brief for the founder, from INTERNAL channels only. Runs in one of two
+ * modes, chosen by the weekday: a `daily` brief Tue–Fri, and a `weekly` review on
+ * the `weekly_review.day` (Monday).
  *
- * Shape, and why: gathering is plain code (Slack reads, filtering, compaction)
- * and only the final write-up is a model call — one toolless single turn for the
- * whole workspace, not one per channel. A brief that ran the full agent per
- * channel would cost ~20 agent loops every weekday morning to answer a question
- * that needs no tools once the text is in hand.
+ * Shape, and why. Gathering is plain code in both modes — Slack reads, filtering,
+ * thread expansion, compaction — and the model only ever writes prose.
+ *
+ *  - `daily`: one toolless turn for the whole workspace. 24 hours of input is
+ *    scarce enough that nearly everything in the window deserves a mention, so
+ *    the model is mostly transcribing and a single digest is the right shape.
+ *  - `weekly`: map-reduce. One toolless turn PER CHANNEL summarizes that
+ *    channel's week (`summarizeChannels`), then one more turn writes the review
+ *    from those summaries. Seven days of input compresses ~35:1 instead of ~5:1,
+ *    which makes the model's job selection rather than transcription — and
+ *    selection needs every project described at comparable depth. A single
+ *    week-wide digest cannot give it that: `compactMessages` drops the OLDEST
+ *    messages at the cap, so a busy channel loses the start of the very arc the
+ *    review promises, and `buildDigest`'s volume sort lets the loudest channel
+ *    crowd out the rest.
+ *
+ * The per-channel turns are NOT the thing the original note warned off. That was
+ * ~20 *agent loops* (tool-using, multi-turn) every weekday; these are toolless
+ * single turns, once a week, on the run that fires least often.
  *
  * Internal-only is enforced by NAME (`classifyChannelName`), the same signal the
  * client-channel guard uses, so a `{client}-pixelup` channel can never be swept
@@ -26,30 +42,55 @@ const TICK_MS = 60 * 1000;
 /** Pinned per the hard rules in CLAUDE.md (model is set in code, never config). */
 const MODEL = 'claude-sonnet-5';
 
-/** Per-channel slice of the digest. One loud channel must not crowd out the rest. */
-const PER_CHANNEL_MAX_CHARS = 4000;
-/** Whole-digest budget handed to the model. */
-const TOTAL_MAX_CHARS = 40000;
-/** Backstop on one channel's history read over the thread-scan window. */
-const SCAN_MAX_MESSAGES = 600;
-
 /**
- * How far back to look for thread PARENTS. Wider than the brief window because a
- * thread started last week can get its replies yesterday, and Slack keys history
- * off the parent's timestamp — see `fetchWindowReplies`.
+ * Per-mode budgets. Held as data rather than branches so the difference between a
+ * daily brief and a weekly review is one table you can read in full.
+ *
+ * `weekly.perChannelMaxChars` is large because each channel gets its OWN model
+ * call — the text no longer competes with 20 other channels for one prompt, so
+ * most channels never truncate at all.
+ *
+ * `threadScanHours` must exceed `lookbackHours` in both modes: `conversations.history`
+ * keys off a thread parent's timestamp, so a parent older than the window whose
+ * replies landed inside it is otherwise invisible. See `fetchWindowReplies`.
  */
-const DEFAULT_THREAD_SCAN_HOURS = 7 * 24;
-/** Threads expanded per channel, busiest-most-recent first. Bounds the API calls. */
-const MAX_THREADS_PER_CHANNEL = 12;
-/** Newest replies kept per thread. */
-const MAX_REPLIES_PER_THREAD = 30;
+const MODES = {
+  daily: {
+    perChannelMaxChars: 4000,
+    totalMaxChars: 40000,
+    maxThreadsPerChannel: 12,
+    maxRepliesPerThread: 30,
+    scanMaxMessages: 600,
+    lookbackHours: 24,
+    threadScanHours: 7 * 24,
+  },
+  weekly: {
+    perChannelMaxChars: 24000,
+    totalMaxChars: 60000,
+    // Raised with the window: over a week the thread cap bounds part 2's
+    // completeness too, since a mention is only seen in an expanded thread.
+    maxThreadsPerChannel: 35,
+    maxRepliesPerThread: 30,
+    scanMaxMessages: 2000,
+    lookbackHours: 7 * 24,
+    threadScanHours: 14 * 24,
+  },
+};
+
+/** Per-channel summaries in flight at once during the weekly map stage. */
+const SUMMARY_CONCURRENCY = 4;
+/** Ceiling on one channel's summary, so 20 of them still reduce cleanly. */
+const CHANNEL_SUMMARY_MAX_CHARS = 2000;
+
+/** @typedef {'daily' | 'weekly'} BriefMode */
 
 /** Schedule defaults, applied when `daily_brief` leaves a field out. */
 const DEFAULT_TIMEZONE = 'Asia/Kolkata';
 const DEFAULT_DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'];
 const DEFAULT_HOUR = 9;
 /** Window the brief covers when config doesn't say. */
-const DEFAULT_LOOKBACK_HOURS = 24;
+const DEFAULT_LOOKBACK_HOURS = MODES.daily.lookbackHours;
+const DEFAULT_WEEKLY_DAY = 'monday';
 
 /** Slack subtypes that are channel bookkeeping, not team activity. */
 const NOISE_SUBTYPES = new Set([
@@ -244,6 +285,52 @@ export function lookbackHoursFor(weekday, cfg) {
 }
 
 /**
+ * Which kind of brief this weekday gets.
+ *
+ * Weekly mode is opt-in (`weekly_review.enabled`), matching how `daily_brief.enabled`
+ * works, so flipping one boolean puts Monday back on the daily path — including its
+ * `monday_lookback_hours` weekend window, which stays as the fallback for exactly
+ * that reason rather than becoming dead config.
+ * @param {string} weekday - Lowercase weekday name.
+ * @param {{ weekly_review?: { enabled?: boolean, day?: string } }} [cfg]
+ * @returns {BriefMode}
+ */
+export function resolveMode(weekday, cfg = {}) {
+  const weekly = cfg.weekly_review;
+  if (!weekly?.enabled) return 'daily';
+  return weekday === (weekly.day || DEFAULT_WEEKLY_DAY).toLowerCase() ? 'weekly' : 'daily';
+}
+
+/**
+ * Mode plus the window it covers — the one place window sizing is decided, so the
+ * scheduler, the CLI and `runDailyBrief` cannot disagree about it.
+ *
+ * The weekly window is a trailing 168h rather than a calendar week: it is
+ * contiguous with the previous weekly review and leaves no gap after Friday's
+ * daily brief (which stopped at Friday's run time), and it needs no boundary math.
+ * @param {string} weekday - Lowercase weekday name.
+ * @param {any} [cfg] - The `daily_brief` config block.
+ * @param {BriefMode} [modeOverride] - Force a mode (the CLI previewing the other one).
+ * @returns {{ mode: BriefMode, lookbackHours: number, scanHours: number }}
+ */
+export function windowHoursFor(weekday, cfg = {}, modeOverride = undefined) {
+  const mode = modeOverride || resolveMode(weekday, cfg);
+  if (mode === 'weekly') {
+    const wr = cfg.weekly_review || {};
+    return {
+      mode,
+      lookbackHours: wr.lookback_hours || MODES.weekly.lookbackHours,
+      scanHours: wr.thread_scan_hours || MODES.weekly.threadScanHours,
+    };
+  }
+  return {
+    mode,
+    lookbackHours: lookbackHoursFor(weekday, cfg),
+    scanHours: cfg.thread_scan_hours ?? MODES.daily.threadScanHours,
+  };
+}
+
+/**
  * YYYY-MM-DD or ISO timestamp → Slack's epoch-seconds, as a number for comparison.
  * @param {string} value
  * @returns {number}
@@ -251,6 +338,55 @@ export function lookbackHoursFor(weekday, cfg) {
 function toEpochSeconds(value) {
   const ms = Date.parse(value);
   return Number.isNaN(ms) ? 0 : Math.floor(ms / 1000);
+}
+
+/**
+ * Compact a week's messages under day headings.
+ *
+ * "What happened last week" needs a timeline, and flat `[ts:…]` lines make the
+ * model reconstruct one from epoch seconds. Bucketing by local day is free and
+ * deterministic, so the arc becomes something it reads rather than infers — the
+ * same instinct as computing part 2 in code.
+ *
+ * Days are filled newest-first against a shared budget, so an over-budget channel
+ * loses whole early days (and says so) instead of losing them silently mid-line.
+ * @param {any[]} messages
+ * @param {{ maxChars: number, timezone: string }} options
+ * @returns {string}
+ */
+export function compactByDay(messages, { maxChars, timezone }) {
+  /** @type {Map<string, { dateKey: string, weekday: string, messages: any[] }>} */
+  const byDay = new Map();
+  for (const m of messages) {
+    const at = new Date(Number(m.ts) * 1000);
+    if (Number.isNaN(at.getTime())) continue;
+    const { dateKey, weekday } = zonedParts(at, timezone);
+    const bucket = byDay.get(dateKey) || { dateKey, weekday, messages: [] };
+    bucket.messages.push(m);
+    byDay.set(dateKey, bucket);
+  }
+
+  const days = [...byDay.values()].sort((a, b) => a.dateKey.localeCompare(b.dateKey));
+  /** @type {string[]} */
+  const kept = [];
+  let remaining = maxChars;
+  let droppedDays = 0;
+
+  for (let i = days.length - 1; i >= 0; i--) {
+    const day = days[i];
+    const heading = `— ${day.weekday[0].toUpperCase()}${day.weekday.slice(1)} ${day.dateKey} —`;
+    // Not enough left for a heading plus something worth reading under it.
+    if (kept.length && remaining < heading.length + 200) {
+      droppedDays = i + 1;
+      break;
+    }
+    const body = compactMessages(day.messages, { maxChars: Math.max(remaining - heading.length - 2, 200) });
+    kept.unshift(`${heading}\n${body}`);
+    remaining -= heading.length + body.length + 2;
+  }
+
+  const note = droppedDays ? `[${droppedDays} earlier day(s) of this window omitted for size.]\n` : '';
+  return note + kept.join('\n\n');
 }
 
 /**
@@ -279,15 +415,15 @@ function annotateReply(reply, parent) {
  *    own ts, so that thread does not appear at all. Detected here via the
  *    parent's `latest_reply`, which is why the scan window is wider than the
  *    brief window.
- * @param {{ client: import('@slack/web-api').WebClient, channelId: string, parents: any[], sinceTs: number, untilTs: number }} args
+ * @param {{ client: import('@slack/web-api').WebClient, channelId: string, parents: any[], sinceTs: number, untilTs: number, maxThreads?: number }} args
  * @returns {Promise<{ threads: Array<{ parent: any, replies: any[] }>, threadsExpanded: number, threadsSkipped: number }>}
  */
-async function fetchWindowReplies({ client, channelId, parents, sinceTs, untilTs }) {
+async function fetchWindowReplies({ client, channelId, parents, sinceTs, untilTs, maxThreads }) {
   const candidates = parents
     .filter((m) => (m.reply_count || 0) > 0 && Number(m.latest_reply || 0) >= sinceTs)
     .sort((a, b) => Number(b.latest_reply || 0) - Number(a.latest_reply || 0));
 
-  const expand = candidates.slice(0, MAX_THREADS_PER_CHANNEL);
+  const expand = candidates.slice(0, maxThreads ?? MODES.daily.maxThreadsPerChannel);
   /** @type {Array<{ parent: any, replies: any[] }>} */
   const threads = [];
   let threadsExpanded = 0;
@@ -370,11 +506,21 @@ export function findDirectMentions({ recipientId, channelName, topLevel, threads
  * The history read spans `scanHours` (wider than the brief window) so threads
  * with old parents and fresh replies are found; only messages and replies whose
  * own timestamp falls inside the brief window are ever briefed on.
- * @param {{ client: import('@slack/web-api').WebClient, channels: BriefChannel[], since: string, until?: string, scanHours?: number, recipientId?: string }} args
- * @returns {Promise<{ active: Array<BriefChannel & { messageCount: number, text: string, threadsExpanded: number }>, quiet: BriefChannel[], unreadable: Array<BriefChannel & { error: string }>, mentions: Array<{ channel: string, author: string, ts: string, text: string, answered: boolean }> }>}
+ * @param {{ client: import('@slack/web-api').WebClient, channels: BriefChannel[], since: string, until?: string, scanHours?: number, recipientId?: string, mode?: BriefMode, timezone?: string }} args
+ * @returns {Promise<{ active: Array<BriefChannel & { messageCount: number, text: string, threadsExpanded: number, activeDays: number }>, quiet: BriefChannel[], unreadable: Array<BriefChannel & { error: string }>, mentions: Array<{ channel: string, author: string, ts: string, text: string, answered: boolean }> }>}
  */
-export async function gatherChannelActivity({ client, channels, since, until, scanHours, recipientId }) {
-  /** @type {Array<BriefChannel & { messageCount: number, text: string, threadsExpanded: number }>} */
+export async function gatherChannelActivity({
+  client,
+  channels,
+  since,
+  until,
+  scanHours,
+  recipientId,
+  mode = 'daily',
+  timezone = DEFAULT_TIMEZONE,
+}) {
+  const budget = MODES[mode] || MODES.daily;
+  /** @type {Array<BriefChannel & { messageCount: number, text: string, threadsExpanded: number, activeDays: number }>} */
   const active = [];
   /** @type {BriefChannel[]} */
   const quiet = [];
@@ -385,7 +531,7 @@ export async function gatherChannelActivity({ client, channels, since, until, sc
 
   const sinceTs = toEpochSeconds(since);
   const untilTs = until ? toEpochSeconds(until) : Number.MAX_SAFE_INTEGER;
-  const scanSince = new Date((sinceTs - (scanHours ?? DEFAULT_THREAD_SCAN_HOURS) * 3600) * 1000).toISOString();
+  const scanSince = new Date((sinceTs - (scanHours ?? budget.threadScanHours) * 3600) * 1000).toISOString();
 
   for (const ch of channels) {
     if (!ch.isMember) {
@@ -396,7 +542,7 @@ export async function gatherChannelActivity({ client, channels, since, until, sc
       // One read over the wider scan window: it yields the in-window top-level
       // messages AND the older parents whose threads may have moved yesterday.
       const { messages } = await fetchChannelHistory(client, ch.id, {
-        limit: SCAN_MAX_MESSAGES,
+        limit: budget.scanMaxMessages,
         sinceDate: scanSince,
         untilDate: until,
       });
@@ -408,6 +554,7 @@ export async function gatherChannelActivity({ client, channels, since, until, sc
         parents: messages,
         sinceTs,
         untilTs,
+        maxThreads: budget.maxThreadsPerChannel,
       });
 
       // Mentions come off the RAW messages, before annotation or truncation.
@@ -416,7 +563,7 @@ export async function gatherChannelActivity({ client, channels, since, until, sc
       }
 
       const annotatedReplies = threads.flatMap((t) =>
-        t.replies.slice(-MAX_REPLIES_PER_THREAD).map((r) => annotateReply(r, t.parent)),
+        t.replies.slice(-budget.maxRepliesPerThread).map((r) => annotateReply(r, t.parent)),
       );
       const substantive = [...topLevel, ...annotatedReplies];
       if (!substantive.length) {
@@ -427,11 +574,19 @@ export async function gatherChannelActivity({ client, channels, since, until, sc
       const note = threadsSkipped
         ? `\n[${threadsSkipped} more thread(s) in this channel had replies in the window but were not expanded.]`
         : '';
+      // Over a week the timeline is the point, so weekly text carries day headings.
+      const text =
+        mode === 'weekly'
+          ? compactByDay(substantive, { maxChars: budget.perChannelMaxChars, timezone })
+          : compactMessages(substantive, { maxChars: budget.perChannelMaxChars });
+      const activeDays = new Set(substantive.map((m) => zonedParts(new Date(Number(m.ts) * 1000), timezone).dateKey))
+        .size;
       active.push({
         ...ch,
         messageCount: substantive.length,
         threadsExpanded,
-        text: compactMessages(substantive, { maxChars: PER_CHANNEL_MAX_CHARS }) + note,
+        activeDays,
+        text: text + note,
       });
     } catch (e) {
       const code = /** @type {any} */ (e)?.data?.error;
@@ -442,9 +597,37 @@ export async function gatherChannelActivity({ client, channels, since, until, sc
 }
 
 /**
+ * The "Needs you" candidate list, decided in code from real Slack mentions. Answered
+ * ones are named but marked, so the model knows not to raise them again.
+ *
+ * DAILY ONLY. Over 24 hours "tagged and hasn't replied" is a live signal; over a
+ * week it degrades into stale asks ("joining the call?" from last Monday), so the
+ * weekly review deliberately has no "Needs you" and never builds this block.
+ * @param {Array<{ channel: string, author: string, ts: string, text: string, answered: boolean }>} mentions
+ * @param {string} recipientName
+ * @returns {{ text: string, openMentions: number }}
+ */
+function buildMentionBlock(mentions, recipientName) {
+  const open = mentions.filter((m) => !m.answered);
+  const answered = mentions.filter((m) => m.answered);
+  const text =
+    `=== TAGGED ${recipientName.toUpperCase()} DIRECTLY — the ONLY permitted source for part 2 ===\n` +
+    (open.length
+      ? open
+          .map((m) => `[#${m.channel}] ${m.author}: "${m.text}" — ${recipientName} has NOT replied in this thread.`)
+          .join('\n')
+      : `Nothing in the window tagged ${recipientName} and went unanswered.`) +
+    (answered.length
+      ? `\n\nAlready handled — ${recipientName} replied in-thread, DO NOT put these in part 2:\n` +
+        answered.map((m) => `[#${m.channel}] ${m.author}: "${m.text}"`).join('\n')
+      : '');
+  return { text, openMentions: open.length };
+}
+
+/**
  * Assemble the prompt digest, newest-activity channels first and trimmed to the
  * total budget. What gets dropped is stated in the digest rather than vanishing.
- * @param {{ active: Array<BriefChannel & { messageCount: number, text: string }>, quiet?: BriefChannel[], mentions?: Array<{ channel: string, author: string, ts: string, text: string, answered: boolean }>, recipientName?: string, conventions: import('../config/index.js').Conventions, since: string, until: string }} args
+ * @param {{ active: Array<BriefChannel & { messageCount: number, text: string }>, quiet?: BriefChannel[], mentions?: Array<{ channel: string, author: string, ts: string, text: string, answered: boolean }>, recipientName?: string, conventions: import('../config/index.js').Conventions, since: string, until: string, totalMaxChars?: number }} args
  * @returns {{ text: string, includedChannels: string[], droppedChannels: string[], openMentions: number }}
  */
 export function buildDigest({
@@ -455,6 +638,7 @@ export function buildDigest({
   conventions,
   since,
   until,
+  totalMaxChars = MODES.daily.totalMaxChars,
 }) {
   const byVolume = [...active].sort((a, b) => b.messageCount - a.messageCount);
   /** @type {string[]} */
@@ -473,7 +657,7 @@ export function buildDigest({
     const clientName = ch.clientKey ? conventions.clients[ch.clientKey]?.display_name : undefined;
     const label = clientName ? `#${ch.name} (client: ${clientName})` : `#${ch.name}`;
     const section = `=== ${label} — ${ch.messageCount} message(s) ===\n${ch.text}`;
-    if (size + section.length > TOTAL_MAX_CHARS && includedChannels.length > 0) {
+    if (size + section.length > totalMaxChars && includedChannels.length > 0) {
       droppedChannels.push(`#${ch.name}`);
       continue;
     }
@@ -498,27 +682,185 @@ export function buildDigest({
       ? `NOTE: ${droppedChannels.length} channel(s) omitted from this digest for size — ${droppedChannels.join(', ')}. Say so at the end of the brief.\n`
       : '');
 
-  // The "Needs you" candidate list, decided in code by @-mention. Answered ones
-  // are named but marked, so the model knows not to raise them again.
-  const open = mentions.filter((m) => !m.answered);
-  const answered = mentions.filter((m) => m.answered);
-  const mentionBlock =
-    `=== TAGGED ${recipientName.toUpperCase()} DIRECTLY — the ONLY permitted source for part 2 ===\n` +
-    (open.length
-      ? open
-          .map((m) => `[#${m.channel}] ${m.author}: "${m.text}" — ${recipientName} has NOT replied in this thread.`)
-          .join('\n')
-      : `Nothing in the window tagged ${recipientName} and went unanswered.`) +
-    (answered.length
-      ? `\n\nAlready handled — ${recipientName} replied in-thread, DO NOT put these in part 2:\n` +
-        answered.map((m) => `[#${m.channel}] ${m.author}: "${m.text}"`).join('\n')
-      : '');
+  const { text: mentionBlock, openMentions } = buildMentionBlock(mentions, recipientName);
 
   return {
     text: `${header}\n${mentionBlock}\n\n${sections.join('\n\n')}`,
     includedChannels,
     droppedChannels,
-    openMentions: open.length,
+    openMentions,
+  };
+}
+
+/**
+ * Run an async mapper over items with a small concurrency cap. Twenty channel
+ * summaries at once would be a burst of parallel API calls for no gain; four keeps
+ * the map stage fast without spiking.
+ * @template T, R
+ * @param {T[]} items
+ * @param {number} limit
+ * @param {(item: T, index: number) => Promise<R>} fn
+ * @returns {Promise<R[]>}
+ */
+async function mapWithConcurrency(items, limit, fn) {
+  /** @type {R[]} */
+  const out = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
+/**
+ * @param {string} channelLabel
+ * @returns {string}
+ */
+function buildChannelSummarySystemPrompt(channelLabel) {
+  return `You are compressing one week of a single INTERNAL Slack channel at Pixelup Labs, a design agency, \
+into a note that will be used to write the agency's weekly review. The channel is ${channelLabel}. It is a \
+team-only channel — no clients are in it.
+
+The transcript is grouped under day headings so you can follow the order things happened in.
+
+Output EXACTLY these four labelled lines, nothing before or after, no markdown, no preamble:
+
+STATE: one sentence on where this work stands as of the end of the week.
+MOVED: 2-5 short bullets ("- ") on what actually changed over the week, oldest first, each naming the day it \
+happened. Progress and decisions only — not every message.
+BLOCKED: one bullet per thing that is stuck, naming who it is waiting on. Write "none" if nothing is.
+OPEN: one bullet per question still unanswered at the end of the week, naming who asked. Write "none" if nothing is.
+
+Rules. Write only what the transcript supports — never guess a cause, an owner, a status, or a date. If the week \
+was just chatter with no real progress, say so in STATE and put "none" in MOVED. Attribute people by their Slack \
+mention exactly as it appears (<@U123>); never invent a name. Keep the whole thing under 200 words.`;
+}
+
+/**
+ * The weekly map stage: one toolless turn per active channel, each with that
+ * channel's full week to itself.
+ *
+ * A channel whose summary call fails falls back to its raw compacted text rather
+ * than dropping out of the review — a degraded section beats a silent hole.
+ * @param {{ active: Array<BriefChannel & { messageCount: number, text: string, activeDays?: number }>, conventions: import('../config/index.js').Conventions, query?: typeof query, logger?: { info: Function, error: Function } }} args
+ * @returns {Promise<Array<{ channel: BriefChannel & { messageCount: number, activeDays?: number }, label: string, summary: string, failed: boolean }>>}
+ */
+export async function summarizeChannels({ active, conventions, query: queryFn, logger }) {
+  const run = queryFn || query;
+
+  return mapWithConcurrency(active, SUMMARY_CONCURRENCY, async (ch) => {
+    const clientName = ch.clientKey ? conventions.clients[ch.clientKey]?.display_name : undefined;
+    const label = clientName ? `#${ch.name} (client: ${clientName})` : `#${ch.name}`;
+    try {
+      /** @type {string[]} */
+      const parts = [];
+      for await (const message of run({
+        prompt:
+          `${untrusted(ch.text, `#${ch.name} — one week of messages`)}\n\n` +
+          "Summarize this channel's week now, in the four labelled lines.",
+        options: {
+          model: MODEL,
+          systemPrompt: buildChannelSummarySystemPrompt(label),
+          maxTurns: 1,
+          // tools: [] REMOVES the built-in tools; allowedTools: [] alone only
+          // refuses to auto-approve them, so a stray tool-use attempt would burn
+          // the single turn and fail the whole call with "max turns reached".
+          tools: [],
+          allowedTools: [],
+          permissionMode: 'default',
+        },
+      })) {
+        if (message.type === 'assistant') {
+          for (const block of message.message.content) {
+            if (block.type === 'text') parts.push(block.text);
+          }
+        }
+      }
+      const summary = parts.join('\n').trim().slice(0, CHANNEL_SUMMARY_MAX_CHARS);
+      if (!summary) throw new Error('empty summary');
+      return { channel: ch, label, summary, failed: false };
+    } catch (e) {
+      logger?.error(`Weekly review: could not summarize #${ch.name} (${e}); falling back to raw messages.`);
+      return {
+        channel: ch,
+        label,
+        summary: `[Summary unavailable for this channel — raw messages follow.]\n${ch.text.slice(0, 4000)}`,
+        failed: true,
+      };
+    }
+  });
+}
+
+/**
+ * Assemble the weekly reduce prompt from the per-channel summaries.
+ *
+ * Every project arrives at comparable depth here, which is the whole point of the
+ * map stage: cross-project selection is a real judgment instead of an artifact of
+ * which channel happened to fit the budget.
+ *
+ * NO mention block, on purpose. "Needs you" is a daily-brief concept: a mention
+ * ages out of actionability within hours ("joining the call?"), so over a seven-day
+ * window the code-derived list fills with dead asks and cc's that outrank real
+ * blockers. The weekly review instead closes on where each project STANDS —
+ * blockers and open questions surface through the per-channel summaries' BLOCKED
+ * and OPEN lines, carrying who they wait on.
+ * @param {{ summaries: Array<{ channel: BriefChannel & { messageCount: number, activeDays?: number }, label: string, summary: string, failed: boolean }>, quiet?: BriefChannel[], conventions: import('../config/index.js').Conventions, since: string, until: string, totalMaxChars?: number }} args
+ * @returns {{ text: string, includedChannels: string[], droppedChannels: string[], failedSummaries: string[] }}
+ */
+export function buildWeeklyDigest({
+  summaries,
+  quiet = [],
+  conventions,
+  since,
+  until,
+  totalMaxChars = MODES.weekly.totalMaxChars,
+}) {
+  const byVolume = [...summaries].sort((a, b) => b.channel.messageCount - a.channel.messageCount);
+  /** @type {string[]} */
+  const sections = [];
+  /** @type {string[]} */
+  const includedChannels = [];
+  /** @type {string[]} */
+  const droppedChannels = [];
+  let size = 0;
+
+  for (const s of byVolume) {
+    const days = s.channel.activeDays ? `, active on ${s.channel.activeDays} day(s)` : '';
+    const section = `=== ${s.label} — ${s.channel.messageCount} message(s) this week${days} ===\n${s.summary}`;
+    if (size + section.length > totalMaxChars && includedChannels.length > 0) {
+      droppedChannels.push(`#${s.channel.name}`);
+      continue;
+    }
+    size += section.length + 2;
+    sections.push(section);
+    includedChannels.push(`#${s.channel.name}`);
+  }
+
+  const quietLabels = quiet
+    .map((ch) => (ch.clientKey ? conventions.clients[ch.clientKey]?.display_name : undefined) || `#${ch.name}`)
+    .sort((a, b) => a.localeCompare(b));
+
+  const header =
+    `WEEKLY REVIEW. Window: ${since} → ${until} (the last 7 days).\n` +
+    "Each section below is a per-channel summary of that channel's whole week, already compressed from the " +
+    'raw messages. Treat each as the record for that project.\n' +
+    `Projects with activity: ${includedChannels.length}\n` +
+    (quietLabels.length
+      ? `Projects with NO activity ALL WEEK (name these in the "no update" line): ${quietLabels.join(', ')}\n`
+      : '') +
+    (droppedChannels.length
+      ? `NOTE: ${droppedChannels.length} channel(s) omitted for size — ${droppedChannels.join(', ')}. Say so at the end.\n`
+      : '');
+
+  return {
+    text: `${header}\n${sections.join('\n\n')}`,
+    includedChannels,
+    droppedChannels,
+    failedSummaries: summaries.filter((s) => s.failed).map((s) => `#${s.channel.name}`),
   };
 }
 
@@ -577,19 +919,86 @@ one emoji beyond the two part markers.`;
 }
 
 /**
+ * The weekly reduce prompt. Kept separate from the daily one rather than
+ * parameterized: the daily prompt is tuned tight around "before their day starts"
+ * and 450 words, and stretching it with conditionals would make both worse.
+ *
+ * There is deliberately NO "Needs you" here — see `buildWeeklyDigest`. The review
+ * answers two questions instead: what happened, and where does every project stand
+ * NOW. "Now" is anchored on each week's latest activity, since the freshest signal
+ * of a project's state is the last thing that happened in it.
+ * @param {string} voice
+ * @param {{ name: string, id: string }} recipient
+ * @returns {string}
+ */
+function buildWeeklySystemPrompt(voice, recipient) {
+  return `You are Pixelup Bot writing the WEEKLY REVIEW for ${recipient.name} at Pixelup Labs, a design agency. \
+Your input is a set of per-channel summaries covering the last seven days of the agency's INTERNAL Slack channels \
+(team only — no clients are in these channels). This review is delivered as a private DM to ${recipient.name}.
+
+THE READER IS ${recipient.name}, whose Slack ID is ${recipient.id} — they appear as <@${recipient.id}>. \
+Any other <@U…> is a colleague, never the reader.
+
+This is a week in review, not a daily update, and it answers exactly two questions: what happened last week, and \
+where does everything stand right now. Your job is selection: seven days of work will not fit, and it should not. \
+Lead with what changed the agency's position — shipped work, decisions, things that slipped, things that are \
+stuck. Routine back-and-forth that went nowhere is not worth a line.
+
+Write only what the summaries support. Never guess at a cause, an owner, or a status that isn't there. Say "no \
+update" for a project rather than inventing progress. A project that was silent all week is itself worth saying.
+
+Agency voice: ${voice}
+
+Output Slack mrkdwn only (*bold*, "• " bullets, <#C123> is fine to echo back if present — no "#" headings, \
+no tables, no links you were not given).
+
+The review has exactly TWO parts, in this order. Both headers always appear.
+
+*:one: What happened last week*
+
+One bullet per active project, most consequential first:
+
+• *{Client}* — the arc of the week: what moved, what shipped, what was decided. Name the day when the timing \
+matters ("slipped Wednesday", "approved Friday"). Story only — save the current state for part 2. Two sentences \
+at most.
+
+Then, if any internal (non-client) channels saw activity, one final bullet "• *Internal* — …" covering them \
+together. If some projects were silent all week, close the part with one line: "_No update: X, Y, Z._"
+
+*:two: Where we stand now*
+
+The snapshot ${recipient.name} carries into this week. One bullet per active project, same order as part 1:
+
+• *{Client}* — the project's state as of the END of the week: draw it from each summary's STATE line and from \
+the latest-dated activity, not from how the week started — if Wednesday said "blocked" and Friday said "shipped", \
+the state is shipped. Fold in what is blocked or still open from the BLOCKED and OPEN lines, naming who each \
+item waits on. One or two sentences.
+
+Skip a project here only if its part 1 bullet already says it closed the week clean with nothing pending — \
+never repeat a bullet just to say "nothing pending".
+
+Attribute people by their Slack mention exactly as it appears (<@U123>) — do not invent names. Put the channel \
+in parens where it helps them go look. Keep the whole review under 800 words. No preamble, no sign-off, at most \
+one emoji beyond the two part markers.`;
+}
+
+/**
  * Write the brief. Reads nothing, posts nothing, has no tools.
  * @param {string} digest
- * @param {{ conventions?: import('../config/index.js').Conventions, recipient?: { name: string, id: string }, query?: typeof query }} [options]
+ * @param {{ conventions?: import('../config/index.js').Conventions, recipient?: { name: string, id: string }, query?: typeof query, mode?: BriefMode }} [options]
  * @returns {Promise<string>}
  */
 export async function summarizeBrief(digest, options = {}) {
   const conventions = options.conventions || loadConventions();
   const queryFn = options.query || query;
   const recipient = options.recipient || { name: 'the reader', id: 'unknown' };
+  const mode = options.mode || 'daily';
 
   const prompt =
-    `${untrusted(digest, 'Slack digest')}\n\n` +
-    'Write the founder brief now, following the structure in your instructions.';
+    `${untrusted(digest, mode === 'weekly' ? 'Weekly channel summaries' : 'Slack digest')}\n\n` +
+    (mode === 'weekly'
+      ? 'Write the weekly review now, following the structure in your instructions.'
+      : 'Write the founder brief now, following the structure in your instructions.');
 
   /** @type {string[]} */
   const parts = [];
@@ -597,8 +1006,15 @@ export async function summarizeBrief(digest, options = {}) {
     prompt,
     options: {
       model: MODEL,
-      systemPrompt: buildSystemPrompt(conventions.agency.voice, recipient),
+      systemPrompt:
+        mode === 'weekly'
+          ? buildWeeklySystemPrompt(conventions.agency.voice, recipient)
+          : buildSystemPrompt(conventions.agency.voice, recipient),
       maxTurns: 1,
+      // tools: [] REMOVES the built-in tools (allowedTools alone only skips
+      // auto-approval) — a stray tool-use attempt would otherwise burn the single
+      // turn and fail the run with "max turns reached".
+      tools: [],
       allowedTools: [],
       permissionMode: 'default',
     },
@@ -636,8 +1052,10 @@ export async function deliverBrief({ client, recipientId, text }) {
  * is who this copy is SENT to, and defaults to the same person. They differ only
  * when someone previews another person's brief: the section must stay anchored on
  * the real subject, or a test copy silently reports the previewer's asks instead.
- * @param {{ client: import('@slack/web-api').WebClient, logger?: { info: Function, error: Function }, conventions?: import('../config/index.js').Conventions, recipientId?: string, deliverTo?: string, since?: string, until?: string, deliver?: boolean, query?: typeof query }} args
- * @returns {Promise<{ brief: string, digest: string, active: Array<{ name: string, messageCount: number, threadsExpanded: number }>, quiet: string[], unreadable: Array<{ name: string, error: string }>, excluded: Array<{ name: string, reason: string }>, skipped: Array<{ name: string, reason: string }>, mentions: Array<{ channel: string, author: string, ts: string, text: string, answered: boolean }>, recipientName: string, missing: Array<{ id: string, reason: string }>, deliveredTo: string | null, since: string, until: string }>}
+ * `mode` is normally derived from the weekday (`weekly_review.day` → weekly, else
+ * daily); passing it explicitly is how the CLI previews Monday's review on a Tuesday.
+ * @param {{ client: import('@slack/web-api').WebClient, logger?: { info: Function, error: Function }, conventions?: import('../config/index.js').Conventions, recipientId?: string, deliverTo?: string, since?: string, until?: string, deliver?: boolean, query?: typeof query, mode?: BriefMode }} args
+ * @returns {Promise<{ brief: string, digest: string, mode: BriefMode, active: Array<{ name: string, messageCount: number, threadsExpanded: number, activeDays: number }>, quiet: string[], unreadable: Array<{ name: string, error: string }>, excluded: Array<{ name: string, reason: string }>, skipped: Array<{ name: string, reason: string }>, mentions: Array<{ channel: string, author: string, ts: string, text: string, answered: boolean }>, recipientName: string, missing: Array<{ id: string, reason: string }>, deliveredTo: string | null, since: string, until: string }>}
  */
 export async function runDailyBrief({
   client,
@@ -649,6 +1067,7 @@ export async function runDailyBrief({
   until,
   deliver = true,
   query: queryFn,
+  mode: modeOverride,
 }) {
   const conventions = given || loadConventions();
   const cfg = conventions.daily_brief || {};
@@ -656,7 +1075,11 @@ export async function runDailyBrief({
   const timezone = cfg.timezone || DEFAULT_TIMEZONE;
   const now = new Date();
   const parts = zonedParts(now, timezone);
-  const windowSince = since || windowStart(now, lookbackHoursFor(parts.weekday, cfg));
+  // An explicit mode brings its own window, or previewing a weekly review on a
+  // Tuesday would summarize 24 hours and call it a week.
+  const window = windowHoursFor(parts.weekday, cfg, modeOverride);
+  const mode = window.mode;
+  const windowSince = since || windowStart(now, window.lookbackHours);
   const windowUntil = until || now.toISOString();
 
   const workspace = await listWorkspaceChannels(client);
@@ -673,15 +1096,22 @@ export async function runDailyBrief({
     channels,
     since: windowSince,
     until: windowUntil,
-    scanHours: cfg.thread_scan_hours,
-    recipientId: recipient.id,
+    scanHours: window.scanHours,
+    // "Needs you" is a daily-brief concept — a week-old @-mention is a dead ask,
+    // not a blocker. No recipient here means no mention is ever collected, so a
+    // stale one cannot leak into the weekly review by any path.
+    recipientId: mode === 'weekly' ? '' : recipient.id,
+    mode,
+    timezone,
   });
 
   const summary = {
+    mode,
     active: active.map((c) => ({
       name: `#${c.name}`,
       messageCount: c.messageCount,
       threadsExpanded: c.threadsExpanded,
+      activeDays: c.activeDays,
     })),
     quiet: quiet.map((c) => `#${c.name}`),
     unreadable: unreadable.map((c) => ({ name: `#${c.name}`, error: c.error })),
@@ -695,23 +1125,53 @@ export async function runDailyBrief({
   };
 
   if (!active.length) {
-    const brief = '*Morning brief* — no internal channel activity in the window. Nothing to report. :sunny:';
+    const brief =
+      mode === 'weekly'
+        ? '*Weekly review* — no internal channel activity in the last week. Nothing to report. :sunny:'
+        : '*Morning brief* — no internal channel activity in the window. Nothing to report. :sunny:';
     let deliveredTo = null;
     if (deliver && sendTo) deliveredTo = await deliverBrief({ client, recipientId: sendTo, text: brief });
-    logger?.info('Daily brief: no activity in window.');
+    logger?.info(`${mode === 'weekly' ? 'Weekly review' : 'Daily brief'}: no activity in window.`);
     return { ...summary, digest: '', brief, deliveredTo };
   }
 
-  const { text: digest, droppedChannels } = buildDigest({
-    active,
-    quiet,
-    mentions,
-    recipientName: recipient.name,
-    conventions,
-    since: windowSince,
-    until: windowUntil,
-  });
-  const brief = await summarizeBrief(digest, { conventions, recipient, query: queryFn });
+  /** @type {string} */
+  let digest;
+  /** @type {string[]} */
+  let droppedChannels;
+  /** @type {string[]} */
+  let failedSummaries = [];
+
+  if (mode === 'weekly') {
+    // Map: one toolless turn per channel, each with its own week to itself.
+    logger?.info(`Weekly review: summarizing ${active.length} channel(s).`);
+    const summaries = await summarizeChannels({ active, conventions, query: queryFn, logger });
+    const built = buildWeeklyDigest({
+      summaries,
+      quiet,
+      conventions,
+      since: windowSince,
+      until: windowUntil,
+    });
+    digest = built.text;
+    droppedChannels = built.droppedChannels;
+    failedSummaries = built.failedSummaries;
+  } else {
+    const built = buildDigest({
+      active,
+      quiet,
+      mentions,
+      recipientName: recipient.name,
+      conventions,
+      since: windowSince,
+      until: windowUntil,
+    });
+    digest = built.text;
+    droppedChannels = built.droppedChannels;
+  }
+
+  // Reduce (weekly) / write-up (daily) — same call, different prompt.
+  const brief = await summarizeBrief(digest, { conventions, recipient, query: queryFn, mode });
 
   /** @type {string[]} */
   const footnotes = [];
@@ -723,11 +1183,16 @@ export async function runDailyBrief({
   if (droppedChannels.length) {
     footnotes.push(`_Trimmed for size: ${droppedChannels.join(', ')}._`);
   }
+  if (failedSummaries.length) {
+    footnotes.push(`_Summarizing failed for ${failedSummaries.join(', ')} — those sections are less reliable._`);
+  }
   const text = footnotes.length ? `${brief}\n\n${footnotes.join('\n')}` : brief;
 
   let deliveredTo = null;
   if (deliver && sendTo) deliveredTo = await deliverBrief({ client, recipientId: sendTo, text });
-  logger?.info(`Daily brief: ${active.length} active channel(s), delivered=${Boolean(deliveredTo)}.`);
+  logger?.info(
+    `${mode === 'weekly' ? 'Weekly review' : 'Daily brief'}: ${active.length} active channel(s), delivered=${Boolean(deliveredTo)}.`,
+  );
 
   return { ...summary, digest, brief: text, deliveredTo };
 }
@@ -774,8 +1239,11 @@ export function startDailyBriefScheduler(client, logger) {
     }
   }, TICK_MS);
   handle.unref?.();
+  const weeklyNote = cfg.weekly_review?.enabled
+    ? `, ${cfg.weekly_review.day || DEFAULT_WEEKLY_DAY} is a weekly review`
+    : '';
   logger.info(
-    `Daily brief scheduler started (${schedule.days.join('/')} ${schedule.hour}:${String(schedule.minute).padStart(2, '0')} ${timezone} → DM ${recipientId}).`,
+    `Daily brief scheduler started (${schedule.days.join('/')} ${schedule.hour}:${String(schedule.minute).padStart(2, '0')} ${timezone} → DM ${recipientId}${weeklyNote}).`,
   );
   return handle;
 }
