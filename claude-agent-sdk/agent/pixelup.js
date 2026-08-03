@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { endOfWeek } from '../approvals/scaffold-rules.js';
 import { conventionsSummary, loadConventions } from '../config/index.js';
 import { agentServerConfig, CLICKUP_MCP, FIREFLIES_MCP } from '../integrations/mcp-servers.js';
-import { createLinkTools, createProposalTools, createSlackReadTools } from './tools/index.js';
+import { createLinkTools, createProposalTools, createSlackReadTools, createTemplateTools } from './tools/index.js';
 import { resolveAmbientChannel } from './tools/slack-read.js';
 
 const BASE_SYSTEM_PROMPT = `\
@@ -128,6 +128,25 @@ client's QA list instead of their engagement list).
 call propose_canvas_update with the channel (use the INTERNAL channel, e.g. "{key}-internal", \
 never a client channel), markdown content, and mode (replace to set the whole canvas, append/ \
 prepend to add). Creating and editing are handled automatically.
+10. **Engagement guidelines draft** — user shares a project scope/overview and asks for \
+engagement guidelines ("draft engagement guidelines for varick"): read the scope (the message \
+itself, or read_shared_file for an attached doc), cross-check the Fireflies kickoff transcript \
+if one exists, call read_engagement_guidelines_template, fill it, then deliver with \
+propose_canvas_update targeting "{key}-internal" (mode replace, title "Engagement Guidelines — \
+{Client} × PIXELUP LABS"). Open to the whole team, and the client does NOT need to be \
+registered — the canvas only needs the channel (code alerts a lead to register them). Filling \
+rules, always:
+   - **Scope facts only.** Every client-specific statement comes from the scope or transcript. \
+Where the scope is silent, keep a [TBD: …] placeholder saying what's needed — NEVER fill a gap \
+with a guess, however plausible.
+   - **House boilerplate stays.** Text outside the [TBD] slots is house standard — carry it \
+through unchanged. Drop a whole section only when the engagement clearly has no use for it, \
+and renumber nothing.
+   - **Conflicts are flagged, not resolved.** Where the scope contradicts a house default \
+(e.g. a different post-launch window), use the scope's value and append "[FLAG: house default \
+is …]" so a human makes the call.
+   - If no channel matching "{key}-internal" is visible to you, say the channel needs to exist \
+and you need to be invited (/invite) — never deliver the draft to a different channel instead.
 
 ## TEAM CONVENTIONS
 - Every user message carries a header: "[Today: <date> · this week ends <friday>]", then \
@@ -213,6 +232,7 @@ const LOCAL_TOOLS = [
   'propose_task_move',
   'propose_task_update',
   'read_channel_messages',
+  'read_engagement_guidelines_template',
   'read_link',
   'read_shared_file',
   'read_slack_thread',
@@ -352,6 +372,7 @@ export async function runPixelupAgent(text, sessionId = undefined, deps = undefi
       ...createSlackReadTools(deps, conventions),
       ...createLinkTools(deps),
       ...createProposalTools(deps, conventions),
+      ...createTemplateTools(),
     );
   }
 

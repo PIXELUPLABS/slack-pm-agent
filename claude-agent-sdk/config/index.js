@@ -44,7 +44,7 @@ import { isPlaceholderId, resetResolverCache } from './resolver.js';
  * @property {Record<string, ClientConfig>} clients
  * @property {Record<string, UserConfig>} users
  * @property {Record<string, InternalListConfig>} [internal_lists] - Non-client ClickUp lists (e.g. Automation Ideas in Operations) the agent may log to.
- * @property {{ drafts_channel_id: string, conversation_channel_ids?: string[] }} channels
+ * @property {{ drafts_channel_id: string, conversation_channel_ids?: string[], registration_alert_slack_id?: string }} channels
  * @property {{ enabled: boolean, days: string[], hour: number, minute: number, timezone: string }} client_updates
  * @property {{ enabled?: boolean, recipient_slack_id?: string, days?: string[], hour?: number, minute?: number, timezone?: string, lookback_hours?: number, monday_lookback_hours?: number, thread_scan_hours?: number, internal_channels?: string[], weekly_review?: { enabled?: boolean, day?: string, lookback_hours?: number, thread_scan_hours?: number } }} [daily_brief] - Morning founder brief from internal channels; `weekly_review` turns one weekday into a week-in-review instead.
  * @property {{ enabled?: boolean, channel_id: string, internal_email_domains?: string[], ignore_title_patterns?: string[] }} [meeting_transcripts] - Fireflies transcript → internal recap automation.
@@ -119,6 +119,12 @@ export function validateConventions(data) {
       data.channels.conversation_channel_ids.some((/** @type {any} */ id) => typeof id !== 'string')
     ) {
       problems.push('channels.conversation_channel_ids must be an array of strings when present');
+    }
+  }
+
+  if (data.channels && data.channels.registration_alert_slack_id !== undefined) {
+    if (typeof data.channels.registration_alert_slack_id !== 'string') {
+      problems.push('channels.registration_alert_slack_id must be a string when present');
     }
   }
 
@@ -301,6 +307,42 @@ export function loadConventions(options = {}) {
 /** Reset the cache (config writes and tests). @returns {void} */
 export function resetConventionsCache() {
   cached = null;
+}
+
+const GUIDELINES_TEMPLATE_PATH = new URL('./engagement-guidelines-template.md', import.meta.url);
+
+/** @type {string | null} */
+let guidelinesTemplateCache = null;
+
+/**
+ * Load the house engagement-guidelines template — the versioned structure the
+ * agent fills when drafting guidelines v1 from a project scope. House terms
+ * (revision rounds, care window, boilerplate sections) live HERE, in git, so
+ * changing them is a config edit, never a prompt edit. `[TBD: …]` slots mark
+ * what a scope must supply; the model may never fill one with a guess.
+ * @param {{ path?: URL | string, force?: boolean }} [options]
+ * @returns {string}
+ */
+export function loadGuidelinesTemplate(options = {}) {
+  if (guidelinesTemplateCache && !options.force && !options.path) return guidelinesTemplateCache;
+  const path = options.path || process.env.GUIDELINES_TEMPLATE_PATH || GUIDELINES_TEMPLATE_PATH;
+  const text = readFileSync(path, 'utf8');
+  /** @type {string[]} */
+  const problems = [];
+  if (!text.includes('{Client}')) problems.push('missing the {Client} token');
+  const sections = (text.match(/^## \d+\./gm) || []).length;
+  if (sections < 10) problems.push(`expected 10 numbered "## N." sections, found ${sections}`);
+  if (!text.includes('[TBD:')) problems.push('missing [TBD: …] placeholder slots');
+  if (problems.length > 0) {
+    throw new Error(`engagement-guidelines-template.md is invalid:\n- ${problems.join('\n- ')}`);
+  }
+  if (!options.path) guidelinesTemplateCache = text;
+  return text;
+}
+
+/** Reset the template cache (tests). @returns {void} */
+export function resetGuidelinesTemplateCache() {
+  guidelinesTemplateCache = null;
 }
 
 /**

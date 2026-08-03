@@ -12,7 +12,7 @@ import {
 } from '../../approvals/scaffold-rules.js';
 import { proposalStore } from '../../approvals/store.js';
 import { isKnownPriority, isLead, knownStatuses, resolveStatus } from '../../config/index.js';
-import { canBotPostInChannel } from '../../config/resolver.js';
+import { canBotPostInChannel, resolveChannelContext } from '../../config/resolver.js';
 import * as clickupMcp from '../../integrations/clickup-mcp.js';
 import { lookupChannelIdByName, resolveChannelArg } from './slack-read.js';
 
@@ -39,6 +39,54 @@ function cleanReferences(urls) {
     ),
   ];
   return cleaned.length > 0 ? cleaned : undefined;
+}
+
+/**
+ * Unregistered-client alerts already sent, client key → epoch ms. Deduped so a
+ * designer iterating on a draft (several canvas proposals in an afternoon)
+ * pings the configured lead once, not once per proposal.
+ * @type {Map<string, number>}
+ */
+let registrationAlerts = new Map();
+const REGISTRATION_ALERT_TTL_MS = 6 * 60 * 60 * 1000;
+
+/** Test hook. @returns {void} */
+export function resetRegistrationAlertCache() {
+  registrationAlerts = new Map();
+}
+
+/**
+ * Someone just proposed a canvas in a `{key}-internal` channel whose key is
+ * not a registered client — canvases only need the channel, so that's allowed,
+ * but it usually means a new engagement nobody has registered yet. DM the
+ * configured lead so the client gets set up. Deterministic (never the model's
+ * call), deduped per client key, and best-effort: a failed DM never fails the
+ * proposal.
+ * @param {{ client: import('@slack/web-api').WebClient, conventions: import('../../config/index.js').Conventions, requesterId: string, channelId: string }} args
+ * @returns {Promise<void>}
+ */
+async function maybeAlertUnregisteredClient({ client, conventions, requesterId, channelId }) {
+  const alertTo = conventions.channels.registration_alert_slack_id;
+  // No recipient configured, or the recipient did it themselves — nothing to say.
+  if (!alertTo || alertTo === requesterId) return;
+  const ctx = await resolveChannelContext({ client, conventions, channelId });
+  if (ctx.kind !== 'client-internal' || !ctx.clientKey) return;
+  if (conventions.clients[ctx.clientKey]) return;
+  const last = registrationAlerts.get(ctx.clientKey);
+  if (last && Date.now() - last < REGISTRATION_ALERT_TTL_MS) return;
+  try {
+    await client.chat.postMessage({
+      channel: alertTo,
+      text:
+        `:bell: <@${requesterId}> just proposed a canvas in <#${channelId}> for *${ctx.clientKey}*, ` +
+        `but \`${ctx.clientKey}\` is not registered in config/conventions.json. ` +
+        `DM me "register ${ctx.clientKey}" and approve the card to set them up.`,
+    });
+    // Only a DM that actually went out claims the dedupe slot.
+    registrationAlerts.set(ctx.clientKey, Date.now());
+  } catch {
+    // Best-effort: the proposal matters more than the nudge.
+  }
 }
 
 /**
@@ -517,13 +565,26 @@ export function createProposalTools(deps, conventions) {
           `Refused: the bot never creates or edits canvases in client channels (${canvasTarget.reason}).`,
         );
       }
-      return postProposal('canvas_update', {
+      const result = await postProposal('canvas_update', {
         channelId,
         channelLabel: channel,
         markdown,
         mode: mode || 'replace',
         title,
       });
+      // Canvas writes don't require a registered client (the guard is by
+      // channel name) — but an unregistered `{key}-internal` target usually
+      // means a brand-new engagement, so nudge the configured lead to run
+      // registration. Only after the card actually posted.
+      if (result.content[0].text.startsWith('Proposal posted')) {
+        await maybeAlertUnregisteredClient({
+          client: deps.client,
+          conventions,
+          requesterId: deps.userId,
+          channelId,
+        });
+      }
+      return result;
     },
   );
 

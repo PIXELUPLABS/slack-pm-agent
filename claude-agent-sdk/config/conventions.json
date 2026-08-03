@@ -256,7 +256,8 @@
   },
   "channels": {
     "drafts_channel_id": "",
-    "conversation_channel_ids": ["C0881HC64Q6", "C096YRP55NV", "C0BGPFL3MMY", "C0BKMCYLSSF"]
+    "conversation_channel_ids": ["C0881HC64Q6", "C096YRP55NV", "C0BGPFL3MMY", "C0BKMCYLSSF"],
+    "registration_alert_slack_id": "U09RKSU0QSX"
   },
   "client_updates": {
     "enabled": false,
