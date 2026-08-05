@@ -302,7 +302,7 @@
     "enabled": true,
     "channel_id": "C096YRP55NV",
     "standup_channel_id": "C0881HC64Q6",
-    "internal_email_domains": ["pixelup.in", "pixeluplabs.com"],
+    "internal_email_domains": ["pixelup.in", "pixeluplabs.com", "arjunsharma.co"],
     "ignore_title_patterns": ["standup", "retro", "allhands", "internalsync", "huddle", "teamsync", "leadership"]
   }
 }

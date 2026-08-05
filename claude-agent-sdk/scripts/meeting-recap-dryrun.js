@@ -125,8 +125,10 @@ if (!header.title || header.participantEmails.length === 0) {
 }
 pass('header parsed', `"${header.title}" · ${header.participantEmails.join(', ')}`);
 
-// The daily standup has its own route and never enters client matching.
-if (isDailyStandupTitle(header.title)) {
+const internalDomains = cfg.internal_email_domains?.length ? cfg.internal_email_domains : ['pixelup.in'];
+
+// Pixelup's all-internal daily standup has its own route and never enters client matching.
+if (isDailyStandupTitle(header.title) && !hasExternalParticipant(header, internalDomains)) {
   pass('title rule', 'daily standup — route action items instead of ignoring it');
   const standupChannel = cfg.standup_channel_id;
   if (!looksLikeChannelId(standupChannel)) {
@@ -169,7 +171,6 @@ const ignoredBy = ignoredTitlePattern(header.title, cfg.ignore_title_patterns);
 if (ignoredBy) stop('title rule', `matches ignore pattern "${ignoredBy}" — treated as an internal ceremony`);
 pass('title rule', 'not an ignored internal ceremony');
 
-const internalDomains = cfg.internal_email_domains?.length ? cfg.internal_email_domains : ['pixelup.in'];
 if (!hasExternalParticipant(header, internalDomains)) {
   stop('external participant', `everyone is on ${internalDomains.join(' / ')} — internal meeting`);
 }

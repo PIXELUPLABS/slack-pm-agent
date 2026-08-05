@@ -94,6 +94,7 @@ describe('meeting-transcript pure helpers', () => {
     assert.ok(isDailyStandupTitle('Meet – Daily Standup | Pixel Up'));
     assert.ok(isDailyStandupTitle('PIXELUP Daily Stand-Up'));
     assert.ok(isDailyStandupTitle('Daily Stand Up'));
+    assert.ok(isDailyStandupTitle('Internal Daily Morning Stand Up Call'));
     assert.ok(!isDailyStandupTitle('Sprint Retro'));
     assert.ok(!isDailyStandupTitle('Weekly Project Standup'));
   });
@@ -146,11 +147,9 @@ describe('handleMeetingTranscript', () => {
   });
 
   it('posts daily standup action items to the configured standup channel', async () => {
-    // A contractor or candidate joining the standup must not turn it into a
-    // client call; title-based standup routing wins over participant domains.
     const header = [
       '*Title:* <https://app.fireflies.ai/view/s|PIXELUP Daily Stand-Up>',
-      '*Participants:* <mailto:krish@pixelup.in|krish@pixelup.in>, <mailto:guest@outside.com|guest@outside.com>',
+      '*Participants:* <mailto:krish@pixelup.in|krish@pixelup.in>, <mailto:hey@arjunsharma.co|hey@arjunsharma.co>',
     ].join('\n');
     const client = makeClient(header, NOTES);
     await handleMeetingTranscript({ client, event: makeEvent(), logger }, { summarize, summarizeStandup });
@@ -165,6 +164,18 @@ describe('handleMeetingTranscript', () => {
     const call = client.chat.postMessage.mock.calls[0].arguments[0];
     assert.strictEqual(call.channel, STANDUP_CHANNEL);
     assert.strictEqual(call.text, 'STANDUP ACTION ITEMS');
+  });
+
+  it('does not send a client daily standup to the agency daily-updates channel', async () => {
+    const header = [
+      '*Title:* <https://app.fireflies.ai/view/s|FuseAI Daily Stand-Up>',
+      '*Participants:* <mailto:krish@pixelup.in|krish@pixelup.in>, <mailto:founder@fuse.ai|founder@fuse.ai>',
+    ].join('\n');
+    const client = makeClient(header, NOTES);
+    await handleMeetingTranscript({ client, event: makeEvent(), logger }, { summarize, summarizeStandup });
+    assert.strictEqual(summarize.mock.callCount(), 0);
+    assert.strictEqual(summarizeStandup.mock.callCount(), 0);
+    assert.strictEqual(client.chat.postMessage.mock.callCount(), 0);
   });
 
   it('still ignores other internal ceremonies', async () => {

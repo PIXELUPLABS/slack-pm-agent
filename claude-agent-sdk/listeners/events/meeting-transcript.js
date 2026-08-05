@@ -162,7 +162,8 @@ function squashTitle(title) {
  * @returns {boolean}
  */
 export function isDailyStandupTitle(title) {
-  return squashTitle(title).includes('dailystandup');
+  const squashed = squashTitle(title);
+  return squashed.includes('daily') && squashed.includes('standup');
 }
 
 /**
@@ -254,11 +255,12 @@ export async function handleMeetingTranscript(args, injected = {}) {
     if (!header.title || header.participantEmails.length === 0) return;
 
     const notesText = messages.find((m) => isNotesMessage(m.text || ''))?.text || e.text || '';
+    const internalDomains = cfg.internal_email_domains?.length ? cfg.internal_email_domains : ['pixelup.in'];
 
     // The internal daily standup is the one ceremony we route: its action items
-    // go to #daily-updates. Title wins over participant domains, so an external
-    // guest can never turn a standup into a client recap.
-    if (isDailyStandupTitle(header.title)) {
+    // go to #daily-updates. Requiring an all-internal participant list keeps a
+    // client's own daily standup out of the agency-wide updates channel.
+    if (isDailyStandupTitle(header.title) && !hasExternalParticipant(header, internalDomains)) {
       const standupChannel = cfg.standup_channel_id;
       remember(dedupeKey);
       if (!looksLikeChannelId(standupChannel)) {
@@ -306,7 +308,6 @@ export async function handleMeetingTranscript(args, injected = {}) {
       return;
     }
 
-    const internalDomains = cfg.internal_email_domains?.length ? cfg.internal_email_domains : ['pixelup.in'];
     // Internal team meeting (everyone on our own domains) → ignore.
     if (!hasExternalParticipant(header, internalDomains)) {
       logger.info(`Meeting transcript ignored — internal meeting "${header.title}".`);
