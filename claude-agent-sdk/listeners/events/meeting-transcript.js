@@ -55,11 +55,12 @@ function domainOf(email) {
  *   *Title:* <https://app.fireflies.ai/view/x|Acme <> PIXELUP Weekly Sync>
  *   *Participants:* <mailto:a@acme.com|a@acme.com>, <mailto:b@pixelup.in|b@pixelup.in>
  *
- * Parsing that as plain text yields an empty title and no participants, which
- * made the whole automation a silent no-op. Normalize the markup away first:
- * unwrap mailto links to the bare address, drop URLs and the surrounding
- * `<`/`>`/`|`, and strip bold/italic markers. Lossy by design — the title only
- * needs to survive well enough to match a client name.
+ * Slack may preserve those fields as separate lines, or flatten the entire
+ * header into one line even though the client renders it as separate blocks.
+ * Normalize the markup away first: unwrap mailto links to the bare address,
+ * drop URLs and the surrounding `<`/`>`/`|`, and strip bold/italic markers.
+ * Lossy by design — the title only needs to survive well enough to match a
+ * client name.
  * @param {string} text
  * @returns {string}
  */
@@ -90,21 +91,25 @@ export function normalizeSlackText(text) {
  * @returns {{ title: string, participantEmails: string[] }}
  */
 export function parseTranscriptHeader(text) {
-  let title = '';
+  // Parse the normalized header as one stream. This handles both the original
+  // newline-delimited shape and Fireflies' current Slack payload, where Title,
+  // Date, Participants, and every highlight field arrive on one line.
+  const normalized = normalizeSlackText(text).replace(/\s+/g, ' ').trim();
+  const titleMatch = normalized.match(/(?:^|\s)Title\s*:\s*(.*?)(?=\s+(?:Date|Participants)\s*:|$)/i);
+  const title = titleMatch?.[1]?.trim() || '';
+
   /** @type {string[]} */
   let participantEmails = [];
-  for (const line of normalizeSlackText(text).split('\n')) {
-    const titleMatch = line.match(/^\s*Title\s*:\s*(.+)$/i);
-    if (titleMatch) title = titleMatch[1].trim();
-    const participantsMatch = line.match(/^\s*Participants\s*:\s*(.+)$/i);
-    if (participantsMatch) {
-      participantEmails = participantsMatch[1]
-        .split(/[,;]/)
-        .map((s) => s.trim())
-        // Keep only things that actually look like an address, so stray words
-        // from a mangled line can't become a fake "domain".
-        .filter((s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s));
-    }
+  const participantsMatch = normalized.match(/(?:^|\s)Participants\s*:\s*/i);
+  if (participantsMatch?.index !== undefined) {
+    const afterLabel = normalized.slice(participantsMatch.index + participantsMatch[0].length);
+    // A Fireflies highlight follows the email list as another Title Case label
+    // (`Brand Refresh:`, `Copy Approval Delays:`, …). Keep malformed list text
+    // for validation, but stop before those later fields so an email mentioned
+    // in a highlight cannot be mistaken for a participant.
+    const nextField = afterLabel.search(/\s+[A-Z][A-Za-z0-9 &'()/-]{1,60}\s*:/);
+    const participantText = nextField >= 0 ? afterLabel.slice(0, nextField) : afterLabel;
+    participantEmails = participantText.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [];
   }
   return { title, participantEmails };
 }

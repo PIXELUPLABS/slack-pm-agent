@@ -30,6 +30,15 @@ const CLIENT_HEADER = [
   '*Brand Direction:* Favor Ideation A.',
 ].join('\n');
 
+// Fireflies currently sends the whole header and its highlight fields on one
+// line. The field labels are visible as separate blocks in Slack, but
+// `event.text` contains spaces rather than newlines between them.
+const INLINE_CLIENT_HEADER =
+  '*Title:* Kick off Call (Naomi Domingo) *Date:* Mon, Aug 3rd - 10:15 PM IST (62 mins) ' +
+  '*Participants:* <mailto:naomi@varickagents.com|naomi@varickagents.com>, ' +
+  '<mailto:daksh@pixelup.in|daksh@pixelup.in>, <mailto:design@pixelup.in|design@pixelup.in> ' +
+  '*Brand Refresh:* Focus on trust and authority. *Website Strategy:* Showcase enterprise credibility.';
+
 const NOTES = [
   'Keywords: Branding, Logo',
   '',
@@ -61,6 +70,16 @@ describe('meeting-transcript pure helpers', () => {
     // and the title is only used to match a client name.
     assert.strictEqual(header.title, 'Example Client PIXELUPLABS - Check In');
     assert.deepStrictEqual(header.participantEmails, ['krish@pixelup.in', 'melissa@example.com', 'design@pixelup.in']);
+  });
+
+  it('parses Fireflies fields when Slack delivers the whole header on one line', () => {
+    const header = parseTranscriptHeader(INLINE_CLIENT_HEADER);
+    assert.strictEqual(header.title, 'Kick off Call (Naomi Domingo)');
+    assert.deepStrictEqual(header.participantEmails, [
+      'naomi@varickagents.com',
+      'daksh@pixelup.in',
+      'design@pixelup.in',
+    ]);
   });
 
   it('detects the notes/action-items message', () => {
