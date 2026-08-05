@@ -1,5 +1,6 @@
-import { summarizeMeeting } from '../../agent/meeting-summary.js';
+import { summarizeMeeting, summarizeStandup } from '../../agent/meeting-summary.js';
 import { loadConventions } from '../../config/index.js';
+import { canBotPostInChannel } from '../../config/resolver.js';
 
 /**
  * Meeting-transcript automation.
@@ -139,14 +140,29 @@ export function isNotesMessage(text) {
  * @returns {string | null} The pattern that matched, or null.
  */
 export function ignoredTitlePattern(title, patterns) {
-  const squash = (/** @type {string} */ s) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
-  const haystack = squash(title || '');
+  const haystack = squashTitle(title);
   if (!haystack) return null;
   for (const pattern of Array.isArray(patterns) ? patterns : []) {
-    const needle = squash(pattern);
+    const needle = squashTitle(pattern);
     if (needle && haystack.includes(needle)) return pattern;
   }
   return null;
+}
+
+/** @param {string | undefined} title @returns {string} */
+function squashTitle(title) {
+  return (title || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+/**
+ * The one internal ceremony that is routed instead of ignored. Keep this
+ * narrower than the generic `standup` ignore pattern: only the daily standup
+ * belongs in #daily-updates.
+ * @param {string} title
+ * @returns {boolean}
+ */
+export function isDailyStandupTitle(title) {
+  return squashTitle(title).includes('dailystandup');
 }
 
 /**
@@ -203,12 +219,13 @@ export function matchClientForMeeting(conventions, header) {
 /**
  * Handle a message in the meeting-transcripts channel.
  * @param {import('@slack/bolt').AllMiddlewareArgs & import('@slack/bolt').SlackEventMiddlewareArgs<'message'>} args
- * @param {{ summarize?: typeof summarizeMeeting }} [injected] - Test seam for the summarizer.
+ * @param {{ summarize?: typeof summarizeMeeting, summarizeStandup?: typeof summarizeStandup }} [injected] - Test seams for the summarizers.
  * @returns {Promise<void>}
  */
 export async function handleMeetingTranscript(args, injected = {}) {
   const { client, event, logger } = args;
   const summarize = injected.summarize || summarizeMeeting;
+  const summarizeDailyStandup = injected.summarizeStandup || summarizeStandup;
   try {
     const conventions = loadConventions();
     const cfg = conventions.meeting_transcripts;
@@ -236,8 +253,53 @@ export async function handleMeetingTranscript(args, injected = {}) {
     // Not actually a Fireflies transcript (no header) — ignore silently.
     if (!header.title || header.participantEmails.length === 0) return;
 
-    // Title rule first, and it WINS over the participant check: a standup with
-    // one external guest (a contractor, a candidate) is still not a client call.
+    const notesText = messages.find((m) => isNotesMessage(m.text || ''))?.text || e.text || '';
+
+    // The internal daily standup is the one ceremony we route: its action items
+    // go to #daily-updates. Title wins over participant domains, so an external
+    // guest can never turn a standup into a client recap.
+    if (isDailyStandupTitle(header.title)) {
+      const standupChannel = cfg.standup_channel_id;
+      remember(dedupeKey);
+      if (!looksLikeChannelId(standupChannel)) {
+        await client.chat.postMessage({
+          channel: e.channel,
+          thread_ts: threadTs,
+          text: ':warning: Daily standup detected, but `meeting_transcripts.standup_channel_id` is not configured.',
+        });
+        logger.error('Daily standup action items not routed — standup_channel_id is missing.');
+        return;
+      }
+      const standupChannelId = /** @type {string} */ (standupChannel);
+      const target = await canBotPostInChannel({
+        client,
+        conventions,
+        channelId: standupChannelId,
+      });
+      if (!target.allowed) {
+        logger.error(`Daily standup action items not routed — ${target.reason}.`);
+        return;
+      }
+      const actionItems = await summarizeDailyStandup({
+        title: header.title,
+        headerText: messages[0]?.text || '',
+        notesText,
+      });
+      if (!actionItems?.trim()) {
+        logger.error('Daily standup action-item summary came back empty — nothing posted.');
+        return;
+      }
+      await client.chat.postMessage({
+        channel: standupChannelId,
+        text: actionItems,
+        unfurl_links: false,
+        unfurl_media: false,
+      });
+      logger.info(`Posted daily standup action items to ${standupChannelId}.`);
+      return;
+    }
+
+    // Other title exclusions still win over the participant check.
     const ignoredBy = ignoredTitlePattern(header.title, cfg.ignore_title_patterns);
     if (ignoredBy) {
       logger.info(`Meeting transcript ignored — title "${header.title}" matches "${ignoredBy}".`);
@@ -278,7 +340,6 @@ export async function handleMeetingTranscript(args, injected = {}) {
       return;
     }
 
-    const notesText = messages.find((m) => isNotesMessage(m.text || ''))?.text || e.text || '';
     const recap = await summarize({
       displayName: match.client.display_name,
       title: header.title,

@@ -47,7 +47,7 @@ import { isPlaceholderId, resetResolverCache } from './resolver.js';
  * @property {{ drafts_channel_id: string, conversation_channel_ids?: string[], registration_alert_slack_id?: string }} channels
  * @property {{ enabled: boolean, days: string[], hour: number, minute: number, timezone: string }} client_updates
  * @property {{ enabled?: boolean, recipient_slack_id?: string, days?: string[], hour?: number, minute?: number, timezone?: string, lookback_hours?: number, monday_lookback_hours?: number, thread_scan_hours?: number, internal_channels?: string[], weekly_review?: { enabled?: boolean, day?: string, lookback_hours?: number, thread_scan_hours?: number } }} [daily_brief] - Morning founder brief from internal channels; `weekly_review` turns one weekday into a week-in-review instead.
- * @property {{ enabled?: boolean, channel_id: string, internal_email_domains?: string[], ignore_title_patterns?: string[] }} [meeting_transcripts] - Fireflies transcript → internal recap automation.
+ * @property {{ enabled?: boolean, channel_id: string, standup_channel_id?: string, internal_email_domains?: string[], ignore_title_patterns?: string[] }} [meeting_transcripts] - Fireflies transcript → internal recap automation, with daily standup action items routed separately.
  */
 
 const DEFAULT_PATH = new URL('./conventions.json', import.meta.url);
@@ -216,6 +216,9 @@ export function validateConventions(data) {
       problems.push('meeting_transcripts must be an object when present');
     } else {
       if (typeof mt.channel_id !== 'string') problems.push('meeting_transcripts.channel_id must be a string');
+      if (mt.standup_channel_id !== undefined && typeof mt.standup_channel_id !== 'string') {
+        problems.push('meeting_transcripts.standup_channel_id must be a string when present');
+      }
       if (mt.enabled !== undefined && typeof mt.enabled !== 'boolean') {
         problems.push('meeting_transcripts.enabled must be a boolean when present');
       }

@@ -1,11 +1,12 @@
 import 'dotenv/config';
 import { WebClient } from '@slack/web-api';
 
-import { summarizeMeeting } from '../agent/meeting-summary.js';
+import { summarizeMeeting, summarizeStandup } from '../agent/meeting-summary.js';
 import { loadConventions } from '../config/index.js';
 import {
   hasExternalParticipant,
   ignoredTitlePattern,
+  isDailyStandupTitle,
   isNotesMessage,
   matchClientForMeeting,
   parseTranscriptHeader,
@@ -123,6 +124,46 @@ if (!header.title || header.participantEmails.length === 0) {
   );
 }
 pass('header parsed', `"${header.title}" · ${header.participantEmails.join(', ')}`);
+
+// The daily standup has its own route and never enters client matching.
+if (isDailyStandupTitle(header.title)) {
+  pass('title rule', 'daily standup — route action items instead of ignoring it');
+  const standupChannel = cfg.standup_channel_id;
+  if (!looksLikeChannelId(standupChannel)) {
+    stop('standup channel', 'meeting_transcripts.standup_channel_id is not configured');
+  }
+  pass('standup channel', `would post action items to ${standupChannel}`);
+
+  if (gatesOnly) {
+    console.log('\nAll standup gates pass. Stopping before the model call (--gates-only).');
+    process.exit(0);
+  }
+
+  const notesText = messages.find((m) => isNotesMessage(m.text || ''))?.text || '';
+  console.log('\nGenerating standup action items…');
+  const actionItems = await summarizeStandup({
+    title: header.title,
+    headerText: messages[0]?.text || '',
+    notesText,
+  });
+  if (!actionItems.trim()) {
+    console.error('\nStandup action-item summary came back empty — the listener would post nothing.');
+    process.exit(1);
+  }
+  console.log(`\n${'─'.repeat(60)}\n${actionItems}\n${'─'.repeat(60)}`);
+  if (!post) {
+    console.log(`\nDry run — not posted. Re-run with --post to send this to ${standupChannel}.`);
+    process.exit(0);
+  }
+  await client.chat.postMessage({
+    channel: /** @type {string} */ (standupChannel),
+    text: actionItems,
+    unfurl_links: false,
+    unfurl_media: false,
+  });
+  console.log(`\nPosted to ${standupChannel}.`);
+  process.exit(0);
+}
 
 const ignoredBy = ignoredTitlePattern(header.title, cfg.ignore_title_patterns);
 if (ignoredBy) stop('title rule', `matches ignore pattern "${ignoredBy}" — treated as an internal ceremony`);

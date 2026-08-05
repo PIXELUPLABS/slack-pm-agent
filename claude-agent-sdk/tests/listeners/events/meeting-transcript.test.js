@@ -10,6 +10,7 @@ import {
   handleMeetingTranscript,
   hasExternalParticipant,
   ignoredTitlePattern,
+  isDailyStandupTitle,
   isNotesMessage,
   matchClientForMeeting,
   parseTranscriptHeader,
@@ -19,6 +20,7 @@ import {
 // From the fixture.
 const TRANSCRIPT_CHANNEL = 'C0TRANSCRIPT';
 const INTERNAL_CHANNEL = 'C0INTERNAL0';
+const STANDUP_CHANNEL = 'C0DAILYUPDATES';
 
 // REAL Slack wire format — bold labels and auto-linked emails. Tests used to
 // use prettified text, which is why they passed while production silently did
@@ -53,6 +55,7 @@ function makeClient(parentText, notesText) {
   return {
     conversations: {
       replies: mock.fn(async () => ({ messages: [{ text: parentText }, { text: notesText }] })),
+      info: mock.fn(async ({ channel }) => ({ channel: { id: channel, name: 'daily-updates' } })),
     },
     chat: { postMessage: mock.fn(async () => ({ ok: true })) },
   };
@@ -87,6 +90,14 @@ describe('meeting-transcript pure helpers', () => {
     assert.ok(!isNotesMessage('Title: A <> B\nParticipants: x@y.com'));
   });
 
+  it('recognizes daily standup title variants without matching other ceremonies', () => {
+    assert.ok(isDailyStandupTitle('Meet – Daily Standup | Pixel Up'));
+    assert.ok(isDailyStandupTitle('PIXELUP Daily Stand-Up'));
+    assert.ok(isDailyStandupTitle('Daily Stand Up'));
+    assert.ok(!isDailyStandupTitle('Sprint Retro'));
+    assert.ok(!isDailyStandupTitle('Weekly Project Standup'));
+  });
+
   it('flags external participants but not all-internal ones', () => {
     assert.ok(hasExternalParticipant({ participantEmails: ['a@pixelup.in', 'b@example.com'] }, ['pixelup.in']));
     assert.ok(!hasExternalParticipant({ participantEmails: ['a@pixelup.in', 'b@pixelup.in'] }, ['pixelup.in']));
@@ -113,12 +124,14 @@ describe('meeting-transcript pure helpers', () => {
 describe('handleMeetingTranscript', () => {
   let logger;
   let summarize;
+  let summarizeStandup;
 
   beforeEach(() => {
     resetConventionsCache();
     resetProcessed();
     logger = { info: mock.fn(), error: mock.fn() };
     summarize = mock.fn(async () => 'RECAP TEXT');
+    summarizeStandup = mock.fn(async () => 'STANDUP ACTION ITEMS');
   });
 
   it('posts a recap to the client internal channel for a client call', async () => {
@@ -132,20 +145,41 @@ describe('handleMeetingTranscript', () => {
     assert.strictEqual(call.text, 'RECAP TEXT');
   });
 
-  it('ignores a standup even when an outsider joined (title rule wins)', async () => {
-    // A contractor or candidate in a standup must not turn it into a client call.
+  it('posts daily standup action items to the configured standup channel', async () => {
+    // A contractor or candidate joining the standup must not turn it into a
+    // client call; title-based standup routing wins over participant domains.
     const header = [
       '*Title:* <https://app.fireflies.ai/view/s|PIXELUP Daily Stand-Up>',
       '*Participants:* <mailto:krish@pixelup.in|krish@pixelup.in>, <mailto:guest@outside.com|guest@outside.com>',
     ].join('\n');
     const client = makeClient(header, NOTES);
-    await handleMeetingTranscript({ client, event: makeEvent(), logger }, { summarize });
+    await handleMeetingTranscript({ client, event: makeEvent(), logger }, { summarize, summarizeStandup });
     assert.strictEqual(summarize.mock.callCount(), 0);
+    assert.strictEqual(summarizeStandup.mock.callCount(), 1);
+    assert.deepStrictEqual(summarizeStandup.mock.calls[0].arguments[0], {
+      title: 'PIXELUP Daily Stand-Up',
+      headerText: header,
+      notesText: NOTES,
+    });
+    assert.strictEqual(client.chat.postMessage.mock.callCount(), 1);
+    const call = client.chat.postMessage.mock.calls[0].arguments[0];
+    assert.strictEqual(call.channel, STANDUP_CHANNEL);
+    assert.strictEqual(call.text, 'STANDUP ACTION ITEMS');
+  });
+
+  it('still ignores other internal ceremonies', async () => {
+    const header = ['Title: PIXELUP Sprint Retro', 'Participants: krish@pixelup.in, design@pixelup.in'].join('\n');
+    const client = makeClient(header, NOTES);
+    await handleMeetingTranscript({ client, event: makeEvent(), logger }, { summarize, summarizeStandup });
+    assert.strictEqual(summarize.mock.callCount(), 0);
+    assert.strictEqual(summarizeStandup.mock.callCount(), 0);
     assert.strictEqual(client.chat.postMessage.mock.callCount(), 0);
   });
 
   it('ignores internal team meetings (all-internal participants)', async () => {
-    const internalHeader = ['Title: Daily Standup', 'Participants: krish@pixelup.in, design@pixelup.in'].join('\n');
+    const internalHeader = ['Title: PIXELUP Project Review', 'Participants: krish@pixelup.in, design@pixelup.in'].join(
+      '\n',
+    );
     const client = makeClient(internalHeader, NOTES);
     await handleMeetingTranscript({ client, event: makeEvent(), logger }, { summarize });
 

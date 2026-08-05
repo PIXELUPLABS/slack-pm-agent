@@ -90,6 +90,16 @@ describe('validateConventions', () => {
     assert.throws(() => validateConventions(data), /default_priority/);
   });
 
+  it('validates the optional standup transcript destination', () => {
+    const valid = /** @type {any} */ (validData());
+    valid.meeting_transcripts = { channel_id: 'C0TRANSCRIPTS', standup_channel_id: 'C0DAILYUPDATES' };
+    assert.deepStrictEqual(validateConventions(valid), valid);
+
+    const invalid = /** @type {any} */ (validData());
+    invalid.meeting_transcripts = { channel_id: 'C0TRANSCRIPTS', standup_channel_id: 123 };
+    assert.throws(() => validateConventions(invalid), /standup_channel_id must be a string/);
+  });
+
   it('accepts a valid weekly_review block', () => {
     const data = /** @type {any} */ (validData());
     data.daily_brief = {

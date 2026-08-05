@@ -59,6 +59,7 @@
   "meeting_transcripts": {
     "enabled": true,
     "channel_id": "C0TRANSCRIPT",
+    "standup_channel_id": "C0DAILYUPDATES",
     "internal_email_domains": ["pixelup.in"],
     "ignore_title_patterns": ["standup", "retro", "allhands", "internalsync", "huddle", "teamsync", "leadership"]
   }

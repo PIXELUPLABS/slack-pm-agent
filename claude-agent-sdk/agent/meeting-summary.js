@@ -39,6 +39,28 @@ Keep the whole thing under ~200 words. No preamble, no sign-off, at most one emo
 }
 
 /**
+ * @param {string} voice
+ * @returns {string}
+ */
+function buildStandupSystemPrompt(voice) {
+  return `You are Pixelup Bot extracting the ACTION ITEMS from Pixelup Labs' internal daily standup. This lands in \
+#daily-updates for the team. It is not a client recap.
+
+Include only concrete next actions and blockers that require follow-up. Preserve every owner and deadline stated in \
+the notes. Do not invent an owner, deadline, project, or action. Omit general discussion, status narration, and decisions \
+that require no follow-up.
+
+Agency voice: ${voice}
+
+Output Slack mrkdwn only (use *bold* and "• " bullets — no "#" headings, no tables). Structure:
+- First line: *Daily standup — action items*
+- Group actions by owner when an owner is named: "*Name:* action".
+- Put unowned actions under "*Unassigned:*".
+- If the notes contain no concrete action items, write "• No action items recorded."
+Keep it concise and under 250 words. No preamble, no sign-off, no emoji.`;
+}
+
+/**
  * Produce the recap text. Reads nothing and posts nothing.
  * @param {{ displayName: string, title: string, headerText: string, notesText: string }} meeting
  * @param {{ conventions?: import('../config/index.js').Conventions, query?: typeof query }} [options]
@@ -65,6 +87,45 @@ export async function summarizeMeeting(meeting, options = {}) {
       model: MODEL,
       systemPrompt: buildSystemPrompt(voice),
       maxTurns: 1,
+      allowedTools: [],
+      permissionMode: 'default',
+    },
+  })) {
+    if (message.type === 'assistant') {
+      for (const block of message.message.content) {
+        if (block.type === 'text') parts.push(block.text);
+      }
+    }
+  }
+  return parts.join('\n').trim();
+}
+
+/**
+ * Produce the internal daily-standup action-item post. Reads nothing and posts
+ * nothing; the listener owns the fixed #daily-updates destination.
+ * @param {{ title: string, headerText: string, notesText: string }} meeting
+ * @param {{ conventions?: import('../config/index.js').Conventions, query?: typeof query }} [options]
+ * @returns {Promise<string>}
+ */
+export async function summarizeStandup(meeting, options = {}) {
+  const conventions = options.conventions || loadConventions();
+  const queryFn = options.query || query;
+  const notes = (meeting.notesText || '').slice(0, MAX_NOTES_CHARS);
+  const prompt =
+    `Meeting: ${meeting.title}\n\n` +
+    `--- Meeting header ---\n${meeting.headerText}\n\n` +
+    `--- Notes & action items ---\n${notes}\n\n` +
+    'Extract the standup action items now.';
+
+  /** @type {string[]} */
+  const parts = [];
+  for await (const message of queryFn({
+    prompt,
+    options: {
+      model: MODEL,
+      systemPrompt: buildStandupSystemPrompt(conventions.agency.voice),
+      maxTurns: 1,
+      tools: [],
       allowedTools: [],
       permissionMode: 'default',
     },
