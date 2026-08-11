@@ -13,6 +13,7 @@ import {
   resolveMode,
   runDailyBrief,
   selectInternalChannels,
+  summarizeBrief,
   summarizeChannels,
   windowHoursFor,
   windowStart,
@@ -850,7 +851,7 @@ describe('buildDigest', () => {
     assert.match(text, /Nothing in the window tagged Daksh and went unanswered/);
   });
 
-  it('orders the busiest channel first', () => {
+  it('uses neutral channel ordering instead of treating message volume as importance', () => {
     const mk = (/** @type {string} */ name, /** @type {number} */ count) => ({
       id: name,
       name,
@@ -860,13 +861,14 @@ describe('buildDigest', () => {
       messageCount: count,
       text: 'x',
     });
-    const { includedChannels } = buildDigest({
-      active: [mk('quiet-internal', 1), mk('busy-internal', 50)],
+    const { text, includedChannels } = buildDigest({
+      active: [mk('z-busy-internal', 50), mk('a-quiet-internal', 1)],
       conventions: /** @type {any} */ (conventions),
       since: 'S',
       until: 'U',
     });
-    assert.deepStrictEqual(includedChannels, ['#busy-internal', '#quiet-internal']);
+    assert.deepStrictEqual(includedChannels, ['#a-quiet-internal', '#z-busy-internal']);
+    assert.match(text, /message counts do NOT indicate importance/);
   });
 
   it('drops channels over the total budget and says so', () => {
@@ -1066,6 +1068,29 @@ describe('buildWeeklyDigest', () => {
     });
     assert.doesNotMatch(text, /TAGGED/);
     assert.doesNotMatch(text, /Needs you|part 2/i);
+  });
+});
+
+describe('summarizeBrief', () => {
+  it('instructs the daily writer to reconstruct workstream arcs and rank by operational importance', async () => {
+    const queryFn = mock.fn(async function* () {
+      yield { type: 'assistant', message: { content: [{ type: 'text', text: 'brief' }] } };
+    });
+    const conventions = conventionsOf();
+
+    await summarizeBrief('digest', {
+      conventions: /** @type {any} */ (conventions),
+      recipient: { id: 'U1', name: 'Daksh' },
+      query: /** @type {any} */ (queryFn),
+      mode: 'daily',
+    });
+
+    const system = queryFn.mock.calls[0].arguments[0].options.systemPrompt;
+    assert.match(system, /group related messages and thread replies into distinct workstreams/);
+    assert.match(system, /Reconstruct the arc/);
+    assert.match(system, /Never rank by message count/);
+    assert.match(system, /Do not merely repeat the last message/);
+    assert.doesNotMatch(system, /ClickUp/);
   });
 });
 
