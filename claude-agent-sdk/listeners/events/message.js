@@ -11,7 +11,7 @@ import { buildFeedbackBlocks } from '../views/feedback-builder.js';
  * @param {import('@slack/types').MessageEvent} event
  * @returns {event is import('@slack/types').GenericMessageEvent}
  */
-function isProcessableMessage(event) {
+export function isProcessableMessage(event) {
   const subtype = /** @type {any} */ (event).subtype;
   return subtype === undefined || subtype === 'file_share';
 }

@@ -6,6 +6,7 @@ import { loadConventions } from './config/index.js';
 import { registerListeners } from './listeners/index.js';
 import { startClientUpdateScheduler } from './schedules/client-updates.js';
 import { startDailyBriefScheduler } from './schedules/daily-brief.js';
+import { startResponseWatchdogScheduler } from './schedules/response-watchdog.js';
 
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
@@ -23,4 +24,5 @@ registerListeners(app);
   app.logger.info('Pixelup Bot is running!');
   startClientUpdateScheduler(app.client, app.logger);
   startDailyBriefScheduler(app.client, app.logger);
+  startResponseWatchdogScheduler(app.client, app.logger);
 })();

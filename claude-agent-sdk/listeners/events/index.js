@@ -1,5 +1,6 @@
 import { handleAppHomeOpened } from './app-home-opened.js';
 import { handleAppMentioned } from './app-mentioned.js';
+import { handleClientResponseWatchdog } from './client-response-watchdog.js';
 import { handleMeetingTranscript } from './meeting-transcript.js';
 import { handleMessage } from './message.js';
 
@@ -16,4 +17,8 @@ export function register(app) {
   // It filters to the configured transcripts channel and ignores everything
   // else, so it never collides with handleMessage.
   app.event('message', (eventArgs) => handleMeetingTranscript(eventArgs));
+  // Separate message listener: tracks unanswered client messages in
+  // {key}-pixelup channels for the response watchdog. Read-only tracking, no
+  // reply, so it never collides with handleMessage either.
+  app.event('message', (eventArgs) => handleClientResponseWatchdog(eventArgs));
 }

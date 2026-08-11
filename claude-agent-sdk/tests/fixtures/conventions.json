@@ -56,6 +56,10 @@
     "minute": 0,
     "timezone": "America/New_York"
   },
+  "client_response_watchdog": {
+    "enabled": true,
+    "threshold_hours": 8
+  },
   "meeting_transcripts": {
     "enabled": true,
     "channel_id": "C0TRANSCRIPT",

@@ -48,6 +48,7 @@ import { isPlaceholderId, resetResolverCache } from './resolver.js';
  * @property {{ enabled: boolean, days: string[], hour: number, minute: number, timezone: string }} client_updates
  * @property {{ enabled?: boolean, recipient_slack_id?: string, days?: string[], hour?: number, minute?: number, timezone?: string, lookback_hours?: number, monday_lookback_hours?: number, thread_scan_hours?: number, internal_channels?: string[], weekly_review?: { enabled?: boolean, day?: string, lookback_hours?: number, thread_scan_hours?: number } }} [daily_brief] - Morning founder brief from internal channels; `weekly_review` turns one weekday into a week-in-review instead.
  * @property {{ enabled?: boolean, channel_id: string, standup_channel_id?: string, internal_email_domains?: string[], ignore_title_patterns?: string[] }} [meeting_transcripts] - Fireflies transcript → internal recap automation, with daily standup action items routed separately.
+ * @property {{ enabled?: boolean, threshold_hours?: number }} [client_response_watchdog] - Nudges the team in a client's internal channel when a client message in their {key}-pixelup channel goes unanswered for threshold_hours; repeats every threshold_hours until a team member replies.
  */
 
 const DEFAULT_PATH = new URL('./conventions.json', import.meta.url);
@@ -235,6 +236,23 @@ export function validateConventions(data) {
           mt.ignore_title_patterns.some((/** @type {any} */ p) => typeof p !== 'string'))
       ) {
         problems.push('meeting_transcripts.ignore_title_patterns must be an array of strings when present');
+      }
+    }
+  }
+
+  if (data.client_response_watchdog !== undefined) {
+    const crw = data.client_response_watchdog;
+    if (!crw || typeof crw !== 'object') {
+      problems.push('client_response_watchdog must be an object when present');
+    } else {
+      if (crw.enabled !== undefined && typeof crw.enabled !== 'boolean') {
+        problems.push('client_response_watchdog.enabled must be a boolean when present');
+      }
+      if (
+        crw.threshold_hours !== undefined &&
+        (typeof crw.threshold_hours !== 'number' || !Number.isFinite(crw.threshold_hours) || crw.threshold_hours <= 0)
+      ) {
+        problems.push('client_response_watchdog.threshold_hours must be a positive number when present');
       }
     }
   }

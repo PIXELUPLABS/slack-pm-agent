@@ -90,6 +90,24 @@ describe('validateConventions', () => {
     assert.throws(() => validateConventions(data), /default_priority/);
   });
 
+  it('accepts a valid client_response_watchdog block', () => {
+    const data = /** @type {any} */ (validData());
+    data.client_response_watchdog = { enabled: true, threshold_hours: 8 };
+    assert.deepStrictEqual(validateConventions(data), data);
+  });
+
+  it('rejects a non-boolean client_response_watchdog.enabled', () => {
+    const data = /** @type {any} */ (validData());
+    data.client_response_watchdog = { enabled: 'yes' };
+    assert.throws(() => validateConventions(data), /client_response_watchdog\.enabled must be a boolean/);
+  });
+
+  it('rejects a non-positive client_response_watchdog.threshold_hours', () => {
+    const data = /** @type {any} */ (validData());
+    data.client_response_watchdog = { enabled: true, threshold_hours: 0 };
+    assert.throws(() => validateConventions(data), /threshold_hours must be a positive number/);
+  });
+
   it('validates the optional standup transcript destination', () => {
     const valid = /** @type {any} */ (validData());
     valid.meeting_transcripts = { channel_id: 'C0TRANSCRIPTS', standup_channel_id: 'C0DAILYUPDATES' };

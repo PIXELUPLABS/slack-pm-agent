@@ -274,6 +274,10 @@
     "minute": 0,
     "timezone": "Asia/Kolkata"
   },
+  "client_response_watchdog": {
+    "enabled": true,
+    "threshold_hours": 8
+  },
   "daily_brief": {
     "enabled": true,
     "recipient_slack_id": "U0760QB4EGZ",
