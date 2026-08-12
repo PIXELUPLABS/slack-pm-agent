@@ -13,18 +13,18 @@ import { shouldRun, zonedParts } from './client-updates.js';
  * Shape, and why. Gathering is plain code in both modes — Slack reads, filtering,
  * thread expansion, compaction — and the model only ever writes prose.
  *
- *  - `daily`: one toolless turn for the whole workspace. 24 hours of input is
- *    scarce enough that nearly everything in the window deserves a mention, so
- *    the model is mostly transcribing and a single digest is the right shape.
+ *  - `daily`: one toolless turn for the whole workspace. Messages stay
+ *    chronological and, when a busy channel hits its cap, preserve both the
+ *    opening context and latest state. The model groups them into workstreams,
+ *    reconstructs each arc, removes chatter, and writes the supported current
+ *    state. Channel volume never stands in for importance.
  *  - `weekly`: map-reduce. One toolless turn PER CHANNEL summarizes that
  *    channel's week (`summarizeChannels`), then one more turn writes the review
  *    from those summaries. Seven days of input compresses ~35:1 instead of ~5:1,
  *    which makes the model's job selection rather than transcription — and
  *    selection needs every project described at comparable depth. A single
- *    week-wide digest cannot give it that: `compactMessages` drops the OLDEST
- *    messages at the cap, so a busy channel loses the start of the very arc the
- *    review promises, and `buildDigest`'s volume sort lets the loudest channel
- *    crowd out the rest.
+ *    week-wide digest cannot give it that: every channel needs comparable depth
+ *    across seven days, beyond what a bounded workspace-wide prompt can retain.
  *
  * The per-channel turns are NOT the thing the original note warned off. That was
  * ~20 *agent loops* (tool-using, multi-turn) every weekday; these are toolless
@@ -56,8 +56,10 @@ const MODEL = 'claude-sonnet-5';
  */
 const MODES = {
   daily: {
-    perChannelMaxChars: 4000,
-    totalMaxChars: 40000,
+    // Daily interpretation needs enough of both the request and its resolution
+    // to reconstruct the conversation arc rather than echoing the last replies.
+    perChannelMaxChars: 6000,
+    totalMaxChars: 60000,
     maxThreadsPerChannel: 12,
     maxRepliesPerThread: 30,
     scanMaxMessages: 600,
@@ -578,7 +580,7 @@ export async function gatherChannelActivity({
       const text =
         mode === 'weekly'
           ? compactByDay(substantive, { maxChars: budget.perChannelMaxChars, timezone })
-          : compactMessages(substantive, { maxChars: budget.perChannelMaxChars });
+          : compactMessages(substantive, { maxChars: budget.perChannelMaxChars, truncation: 'arc' });
       const activeDays = new Set(substantive.map((m) => zonedParts(new Date(Number(m.ts) * 1000), timezone).dateKey))
         .size;
       active.push({
@@ -625,8 +627,10 @@ function buildMentionBlock(mentions, recipientName) {
 }
 
 /**
- * Assemble the prompt digest, newest-activity channels first and trimmed to the
- * total budget. What gets dropped is stated in the digest rather than vanishing.
+ * Assemble the prompt digest with neutral channel ordering and trim it to the
+ * total budget. Message volume is not importance: a quiet approval or blocker can
+ * matter more than a busy delivery thread. What gets dropped is stated rather
+ * than vanishing.
  * @param {{ active: Array<BriefChannel & { messageCount: number, text: string }>, quiet?: BriefChannel[], mentions?: Array<{ channel: string, author: string, ts: string, text: string, answered: boolean }>, recipientName?: string, conventions: import('../config/index.js').Conventions, since: string, until: string, totalMaxChars?: number }} args
  * @returns {{ text: string, includedChannels: string[], droppedChannels: string[], openMentions: number }}
  */
@@ -640,7 +644,12 @@ export function buildDigest({
   until,
   totalMaxChars = MODES.daily.totalMaxChars,
 }) {
-  const byVolume = [...active].sort((a, b) => b.messageCount - a.messageCount);
+  const ordered = [...active].sort((a, b) => {
+    const aIsClient = Boolean(a.clientKey && conventions.clients[a.clientKey]?.display_name);
+    const bIsClient = Boolean(b.clientKey && conventions.clients[b.clientKey]?.display_name);
+    if (aIsClient !== bIsClient) return aIsClient ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
   /** @type {string[]} */
   const sections = [];
   /** @type {string[]} */
@@ -649,7 +658,7 @@ export function buildDigest({
   const droppedChannels = [];
   let size = 0;
 
-  for (const ch of byVolume) {
+  for (const ch of ordered) {
     // Only call it a client if it IS one. Plenty of internal channels match the
     // `{key}-internal` convention without a client behind them (#pixelup-internal,
     // #design-engineering-internal) — labelling those "client: pixelup" would put
@@ -675,6 +684,8 @@ export function buildDigest({
   const header =
     `Window: ${since} → ${until}\n` +
     `Internal channels with activity: ${includedChannels.length}\n` +
+    'The channel sections are raw chronological evidence. Their order and message counts do NOT indicate ' +
+    'importance. Reconstruct each workstream from its opening context through its latest supported state.\n' +
     (quietLabels.length
       ? `Projects with NO activity in the window (name these in the "no update" line): ${quietLabels.join(', ')}\n`
       : '') +
@@ -878,10 +889,27 @@ THE READER IS ${recipient.name}, whose Slack ID is ${recipient.id} — they appe
 "You" always means ${recipient.name} and nobody else. Any other <@U…> is a colleague, never the reader.
 
 Your job is to tell them what they need to know before their day starts, and nothing else. They will read this \
-in under a minute. Assume they have not read Slack.
+in under a minute. Assume they have not read Slack. This is a project-status synthesis, NOT a recap of the last \
+few messages.
 
 Write only what the digest supports. Never guess at a cause, an owner, or a status that isn't there. Say "no \
 update" for a project rather than inventing progress, and never pad — a short brief is a good brief.
+
+HOW TO INTERPRET THE SLACK EVIDENCE — do this before writing:
+
+1. Within each channel, group related messages and thread replies into distinct workstreams, deliverables, or \
+decisions. A channel may contain more than one.
+2. Read each workstream from earliest to latest. Reconstruct the arc: the original task or question, the \
+material development, and the latest supported state. A later approval or answer supersedes an earlier blocker \
+or open question.
+3. Extract only consequential signals: completed work, decisions, approvals, rejections, explicit deadlines or \
+urgency, blockers, scope changes, handoffs, and concrete next steps.
+4. Discard greetings, acknowledgements, routine coordination, repeated status statements, and intermediate \
+messages that a later message resolves or supersedes. Do not quote or paraphrase a sequence message-by-message.
+5. Correlate related statements across the channel and its threads. Do not treat the newest message as the \
+essence merely because it came last.
+6. Use timeline or priority language ONLY when Slack states or clearly demonstrates it. With no supported \
+timeline, priority, owner, or next step, omit that field rather than guessing.
 
 Agency voice: ${voice}
 
@@ -892,10 +920,17 @@ The brief has exactly TWO parts, in this order. Both headers always appear.
 
 *:one: Where every project stands*
 
-This is the main event — the founder's picture of the whole agency. One bullet per active project, busiest first:
+This is the main event — the founder's picture of the whole agency. One bullet per active project. Order projects \
+by what matters operationally: blockers and explicit deadline risk first, then decisions/approvals needed, \
+material completions or changes, and routine progress last. Never rank by message count.
 
-• *{Client}* — what happened yesterday, then where it stands now. Fold the blockers and the unanswered \
-questions into this same bullet, naming who each one is waiting on. Two sentences at most.
+• *{Client}* — capture the essence of the work, not the conversation: what materially changed and why it matters; \
+where the project stands now; then the next concrete step and owner when stated. Fold supported timeline, urgency, \
+blockers, and unanswered questions into the same bullet. If multiple unrelated workstreams materially moved, \
+separate them clearly inside the bullet. Three compact sentences at most.
+
+Do not write chronological play-by-play ("A said..., then B said..."). Do not merely repeat the last message. \
+Prefer a status conclusion such as "approved and ready for handoff" over the messages that led to it.
 
 Then, if any internal (non-client) channels saw activity, one final bullet "• *Internal* — …" covering them \
 together. And if some projects were silent, close the part with one line: "_No update: X, Y, Z._"
@@ -914,14 +949,14 @@ An approval question that tags nobody ("is this good enough to send?") does NOT 
 as project status, because nothing shows it is ${recipient.name}'s to answer.
 
 Attribute people by their Slack mention exactly as it appears (<@U123>) — do not invent names. Put the channel \
-in parens where it helps them go look. Keep the whole brief under 450 words. No preamble, no sign-off, at most \
+in parens where it helps them go look. Keep the whole brief under 550 words. No preamble, no sign-off, at most \
 one emoji beyond the two part markers.`;
 }
 
 /**
  * The weekly reduce prompt. Kept separate from the daily one rather than
  * parameterized: the daily prompt is tuned tight around "before their day starts"
- * and 450 words, and stretching it with conditionals would make both worse.
+ * and 550 words, and stretching it with conditionals would make both worse.
  *
  * There is deliberately NO "Needs you" here — see `buildWeeklyDigest`. The review
  * answers two questions instead: what happened, and where does every project stand

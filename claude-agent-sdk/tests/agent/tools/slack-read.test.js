@@ -245,6 +245,20 @@ describe('compactMessages', () => {
     assert.ok(text.includes('ts:149')); // newest survives
     assert.ok(!text.includes('ts:100')); // oldest dropped
   });
+
+  it('preserves the opening context and latest state for an over-budget conversation arc', () => {
+    const messages = Array.from({ length: 50 }, (_, i) => ({
+      type: 'message',
+      ts: String(100 + i),
+      user: 'U1',
+      text: `${i === 0 ? 'ORIGINAL REQUEST ' : i === 49 ? 'FINAL STATE ' : ''}${'x'.repeat(100)}`,
+    }));
+    const text = compactMessages(messages, { maxChars: 1200, truncation: 'arc' });
+    assert.match(text, /ORIGINAL REQUEST/);
+    assert.match(text, /FINAL STATE/);
+    assert.match(text, /middle message\(s\) omitted/);
+    assert.ok(!text.includes('ts:125'));
+  });
 });
 
 describe('resolveAmbientChannel', () => {

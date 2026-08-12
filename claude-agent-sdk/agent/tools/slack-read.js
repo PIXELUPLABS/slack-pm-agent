@@ -84,7 +84,7 @@ function messageReactions(m) {
  * Render messages as compact chronological lines (oldest → newest, the order
  * someone reading the channel would see) within the character budget.
  * @param {any[]} messages
- * @param {{ maxChars?: number }} [options]
+ * @param {{ maxChars?: number, truncation?: 'newest' | 'arc' }} [options]
  * @returns {string}
  */
 export function compactMessages(messages, options = {}) {
@@ -105,6 +105,40 @@ export function compactMessages(messages, options = {}) {
   const maxChars = options.maxChars ?? MAX_HISTORY_CHARS;
   const joined = lines.join('\n');
   if (joined.length <= maxChars) return joined;
+
+  // A status brief needs both ends of a conversation: the opening request gives
+  // the work its meaning, while the latest messages say where it landed. Keep
+  // both when requested instead of turning a busy channel into a recap of only
+  // its last few messages. Other callers retain the historical newest-only
+  // behavior by default.
+  if (options.truncation === 'arc') {
+    /** @type {string[]} */
+    const first = [];
+    /** @type {string[]} */
+    const last = [];
+    // Reserve room for the omission marker, then split the remainder evenly.
+    const half = Math.max(1, Math.floor((maxChars - 120) / 2));
+    let firstSize = 0;
+    let firstEnd = 0;
+    while (firstEnd < lines.length && firstSize + lines[firstEnd].length + 1 <= half) {
+      first.push(lines[firstEnd]);
+      firstSize += lines[firstEnd].length + 1;
+      firstEnd++;
+    }
+
+    let lastSize = 0;
+    let lastStart = lines.length;
+    while (lastStart > firstEnd && lastSize + lines[lastStart - 1].length + 1 <= half) {
+      lastStart--;
+      last.unshift(lines[lastStart]);
+      lastSize += lines[lastStart].length + 1;
+    }
+
+    const dropped = Math.max(0, lastStart - firstEnd);
+    if (dropped > 0) {
+      return `${first.join('\n')}\n[${dropped} middle message(s) omitted for size; opening context and latest state preserved.]\n${last.join('\n')}`;
+    }
+  }
 
   // Over budget: keep the newest messages that fit and say what was dropped.
   /** @type {string[]} */
