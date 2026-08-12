@@ -48,7 +48,7 @@ import { isPlaceholderId, resetResolverCache } from './resolver.js';
  * @property {{ enabled: boolean, days: string[], hour: number, minute: number, timezone: string }} client_updates
  * @property {{ enabled?: boolean, recipient_slack_id?: string, days?: string[], hour?: number, minute?: number, timezone?: string, lookback_hours?: number, monday_lookback_hours?: number, thread_scan_hours?: number, internal_channels?: string[], weekly_review?: { enabled?: boolean, day?: string, lookback_hours?: number, thread_scan_hours?: number } }} [daily_brief] - Morning founder brief from internal channels; `weekly_review` turns one weekday into a week-in-review instead.
  * @property {{ enabled?: boolean, channel_id: string, standup_channel_id?: string, internal_email_domains?: string[], ignore_title_patterns?: string[] }} [meeting_transcripts] - Fireflies transcript → internal recap automation, with daily standup action items routed separately.
- * @property {{ enabled?: boolean, threshold_hours?: number }} [client_response_watchdog] - Nudges the team in a client's internal channel when a client message in their {key}-pixelup channel goes unanswered for threshold_hours; repeats every threshold_hours until a team member replies.
+ * @property {{ enabled?: boolean, threshold_hours?: number, ack_emoji?: string[] }} [client_response_watchdog] - Nudges the team in a client's internal channel when a client message in their {key}-pixelup channel goes unanswered for threshold_hours; repeats every threshold_hours until a team member replies or reacts with one of ack_emoji (default: thumbs-up / check-mark) on the tracked message.
  */
 
 const DEFAULT_PATH = new URL('./conventions.json', import.meta.url);
@@ -253,6 +253,14 @@ export function validateConventions(data) {
         (typeof crw.threshold_hours !== 'number' || !Number.isFinite(crw.threshold_hours) || crw.threshold_hours <= 0)
       ) {
         problems.push('client_response_watchdog.threshold_hours must be a positive number when present');
+      }
+      if (
+        crw.ack_emoji !== undefined &&
+        (!Array.isArray(crw.ack_emoji) ||
+          crw.ack_emoji.length === 0 ||
+          crw.ack_emoji.some((/** @type {any} */ v) => typeof v !== 'string'))
+      ) {
+        problems.push('client_response_watchdog.ack_emoji must be a non-empty array of strings when present');
       }
     }
   }

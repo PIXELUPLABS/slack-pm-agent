@@ -19,9 +19,20 @@ import { isProcessableMessage } from './message.js';
  * treated as the client (or a client-side guest), and any team-member message
  * anywhere in the channel — top-level or in a thread — clears the pending
  * entry.
+ *
+ * A team member can also acknowledge without replying: reacting with one of
+ * `ack_emoji` on the tracked client message (`handleClientResponseAck`,
+ * driven by `reaction_added`) clears the entry the same way a reply would.
+ * Matched by the reacted-to message's own ts against the entry's
+ * `firstMessageTs`/`latestMessageTs` — never "any reaction in the channel" —
+ * so reacting to something unrelated (an old message, a team member's own
+ * message) never clears a pending reminder it wasn't about.
  */
 
 const SNIPPET_MAX_CHARS = 200;
+
+/** Reaction names (Slack's canonical `name`, no colons) that count as "acknowledged". */
+const DEFAULT_ACK_EMOJI = ['+1', 'thumbsup', 'white_check_mark', 'heavy_check_mark', 'ballot_box_with_check'];
 
 /**
  * @param {string} text
@@ -78,5 +89,49 @@ export async function handleClientResponseWatchdog({ client, event, logger }) {
     }
   } catch (err) {
     logger.error(`Client response watchdog tracking failed: ${err}`);
+  }
+}
+
+/**
+ * A team member reacting with an ack emoji (thumbs-up, check mark, …) on the
+ * tracked client message counts as acknowledged — the same as replying —
+ * and clears the pending entry so no reminder fires for it.
+ * @param {import('@slack/bolt').AllMiddlewareArgs & import('@slack/bolt').SlackEventMiddlewareArgs<'reaction_added'>} args
+ * @returns {Promise<void>}
+ */
+export async function handleClientResponseAck({ client, event, logger }) {
+  try {
+    const conventions = loadConventions();
+    const watchdog = conventions.client_response_watchdog;
+    if (!watchdog || watchdog.enabled === false) return;
+
+    const e = /** @type {any} */ (event);
+    if (e.item?.type !== 'message' || !e.item.channel || !e.item.ts || !e.user || !e.reaction) return;
+
+    // Only a configured team member's reaction counts as an acknowledgement —
+    // the client reacting to their own message doesn't mean anything.
+    if (!conventions.users[e.user]) return;
+
+    const ackEmoji = new Set(watchdog.ack_emoji || DEFAULT_ACK_EMOJI);
+    if (!ackEmoji.has(e.reaction)) return;
+
+    const pending = pendingClientMessages.get(e.item.channel);
+    if (!pending) return;
+
+    // Only the tracked client message(s) — not just any reaction anywhere in
+    // the channel — counts, so an unrelated reaction can never clear a
+    // reminder it wasn't about.
+    if (e.item.ts !== pending.firstMessageTs && e.item.ts !== pending.latestMessageTs) return;
+
+    const ctx = await resolveChannelContext({ client, conventions, channelId: e.item.channel });
+    if (ctx.kind !== 'client-external' || !ctx.clientKey) return;
+
+    const waitedMin = Math.round((Date.now() - pending.firstSeenAt) / 60000);
+    pendingClientMessages.clearChannel(e.item.channel);
+    logger.info(
+      `Response watchdog acknowledged via :${e.reaction}: for ${ctx.clientKey} — cleared after ${waitedMin}m unanswered.`,
+    );
+  } catch (err) {
+    logger.error(`Client response watchdog ack tracking failed: ${err}`);
   }
 }

@@ -1,6 +1,6 @@
 import { handleAppHomeOpened } from './app-home-opened.js';
 import { handleAppMentioned } from './app-mentioned.js';
-import { handleClientResponseWatchdog } from './client-response-watchdog.js';
+import { handleClientResponseAck, handleClientResponseWatchdog } from './client-response-watchdog.js';
 import { handleMeetingTranscript } from './meeting-transcript.js';
 import { handleMessage } from './message.js';
 
@@ -21,4 +21,8 @@ export function register(app) {
   // {key}-pixelup channels for the response watchdog. Read-only tracking, no
   // reply, so it never collides with handleMessage either.
   app.event('message', (eventArgs) => handleClientResponseWatchdog(eventArgs));
+  // A team member reacting (thumbs-up, check mark, …) on the tracked client
+  // message acknowledges it the same as a reply — clears the pending entry
+  // so the watchdog scheduler never reminds on it.
+  app.event('reaction_added', handleClientResponseAck);
 }

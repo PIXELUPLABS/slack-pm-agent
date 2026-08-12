@@ -11,7 +11,10 @@ process.env.CONVENTIONS_PATH = FIXTURE_PATH;
 
 import { resetConventionsCache } from '../../../config/index.js';
 import { resetResolverCache } from '../../../config/resolver.js';
-import { handleClientResponseWatchdog } from '../../../listeners/events/client-response-watchdog.js';
+import {
+  handleClientResponseAck,
+  handleClientResponseWatchdog,
+} from '../../../listeners/events/client-response-watchdog.js';
 import { pendingClientMessages } from '../../../thread-context/index.js';
 
 const tempDir = mkdtempSync(join(tmpdir(), 'response-watchdog-'));
@@ -126,8 +129,16 @@ describe('handleClientResponseWatchdog', () => {
 
   it('keeps the firstMessageTs when the client sends a second message before any reply', async () => {
     const client = makeClient();
-    await handleClientResponseWatchdog({ client, event: makeEvent({ ts: '1.0', text: 'first' }), logger: makeLogger() });
-    await handleClientResponseWatchdog({ client, event: makeEvent({ ts: '2.0', text: 'second' }), logger: makeLogger() });
+    await handleClientResponseWatchdog({
+      client,
+      event: makeEvent({ ts: '1.0', text: 'first' }),
+      logger: makeLogger(),
+    });
+    await handleClientResponseWatchdog({
+      client,
+      event: makeEvent({ ts: '2.0', text: 'second' }),
+      logger: makeLogger(),
+    });
     const entry = pendingClientMessages.get(EXTERNAL_CHANNEL);
     assert.strictEqual(entry?.firstMessageTs, '1.0');
     assert.strictEqual(entry?.latestMessageTs, '2.0');
@@ -145,6 +156,174 @@ describe('handleClientResponseWatchdog', () => {
     try {
       const client = makeClient();
       await handleClientResponseWatchdog({ client, event: makeEvent(), logger: makeLogger() });
+      assert.strictEqual(pendingClientMessages.get(EXTERNAL_CHANNEL), undefined);
+    } finally {
+      process.env.CONVENTIONS_PATH = FIXTURE_PATH;
+      resetConventionsCache();
+    }
+  });
+});
+
+function makeReactionEvent(overrides = {}) {
+  return {
+    user: MEMBER_ID,
+    reaction: 'thumbsup',
+    item: { type: 'message', channel: EXTERNAL_CHANNEL, ts: '1.0' },
+    ...overrides,
+  };
+}
+
+describe('handleClientResponseAck', () => {
+  beforeEach(() => {
+    resetConventionsCache();
+    resetResolverCache();
+    pendingClientMessages.clear();
+  });
+
+  it('clears the pending entry when a team member reacts with a thumbs-up on the tracked message', async () => {
+    const client = makeClient();
+    await handleClientResponseWatchdog({ client, event: makeEvent({ ts: '1.0' }), logger: makeLogger() });
+    assert.ok(pendingClientMessages.get(EXTERNAL_CHANNEL));
+
+    await handleClientResponseAck({ client, event: makeReactionEvent(), logger: makeLogger() });
+    assert.strictEqual(pendingClientMessages.get(EXTERNAL_CHANNEL), undefined);
+  });
+
+  it('clears the pending entry on a check-mark reaction on the latest tracked message', async () => {
+    const client = makeClient();
+    await handleClientResponseWatchdog({
+      client,
+      event: makeEvent({ ts: '1.0', text: 'first' }),
+      logger: makeLogger(),
+    });
+    await handleClientResponseWatchdog({
+      client,
+      event: makeEvent({ ts: '2.0', text: 'second' }),
+      logger: makeLogger(),
+    });
+
+    await handleClientResponseAck({
+      client,
+      event: makeReactionEvent({
+        reaction: 'white_check_mark',
+        item: { type: 'message', channel: EXTERNAL_CHANNEL, ts: '2.0' },
+      }),
+      logger: makeLogger(),
+    });
+    assert.strictEqual(pendingClientMessages.get(EXTERNAL_CHANNEL), undefined);
+  });
+
+  it('a lead reacting also clears the pending entry', async () => {
+    const client = makeClient();
+    await handleClientResponseWatchdog({ client, event: makeEvent({ ts: '1.0' }), logger: makeLogger() });
+    await handleClientResponseAck({ client, event: makeReactionEvent({ user: LEAD_ID }), logger: makeLogger() });
+    assert.strictEqual(pendingClientMessages.get(EXTERNAL_CHANNEL), undefined);
+  });
+
+  it('ignores a reaction from someone not in conventions.users (e.g. the client themself)', async () => {
+    const client = makeClient();
+    await handleClientResponseWatchdog({ client, event: makeEvent({ ts: '1.0' }), logger: makeLogger() });
+    await handleClientResponseAck({
+      client,
+      event: makeReactionEvent({ user: CLIENT_USER_ID }),
+      logger: makeLogger(),
+    });
+    assert.ok(pendingClientMessages.get(EXTERNAL_CHANNEL));
+  });
+
+  it('ignores a reaction emoji that is not in the ack set', async () => {
+    const client = makeClient();
+    await handleClientResponseWatchdog({ client, event: makeEvent({ ts: '1.0' }), logger: makeLogger() });
+    await handleClientResponseAck({
+      client,
+      event: makeReactionEvent({ reaction: 'eyes' }),
+      logger: makeLogger(),
+    });
+    assert.ok(pendingClientMessages.get(EXTERNAL_CHANNEL));
+  });
+
+  it('ignores a reaction on a message that is not the tracked one', async () => {
+    const client = makeClient();
+    await handleClientResponseWatchdog({ client, event: makeEvent({ ts: '1.0' }), logger: makeLogger() });
+    await handleClientResponseAck({
+      client,
+      event: makeReactionEvent({ item: { type: 'message', channel: EXTERNAL_CHANNEL, ts: '9.9' } }),
+      logger: makeLogger(),
+    });
+    assert.ok(pendingClientMessages.get(EXTERNAL_CHANNEL));
+  });
+
+  it('does nothing when there is no pending entry for the channel', async () => {
+    const client = makeClient();
+    await handleClientResponseAck({ client, event: makeReactionEvent(), logger: makeLogger() });
+    assert.strictEqual(pendingClientMessages.get(EXTERNAL_CHANNEL), undefined);
+  });
+
+  it('ignores a reaction on a channel that is not client-external', async () => {
+    const client = makeClient('team-internal-chat');
+    await handleClientResponseAck({
+      client,
+      event: makeReactionEvent({ item: { type: 'message', channel: 'C0SOMEOTHER1', ts: '1.0' } }),
+      logger: makeLogger(),
+    });
+    assert.strictEqual(pendingClientMessages.get('C0SOMEOTHER1'), undefined);
+  });
+
+  it('ignores non-message reaction targets (e.g. a file)', async () => {
+    const client = makeClient();
+    await handleClientResponseWatchdog({ client, event: makeEvent({ ts: '1.0' }), logger: makeLogger() });
+    await handleClientResponseAck({
+      client,
+      event: makeReactionEvent({ item: { type: 'file', file: 'F123' } }),
+      logger: makeLogger(),
+    });
+    assert.ok(pendingClientMessages.get(EXTERNAL_CHANNEL));
+  });
+
+  it('does nothing when the watchdog is disabled in config', async () => {
+    const tempPath = join(tempDir, 'ack-disabled.json');
+    copyFileSync(FIXTURE_PATH, tempPath);
+    const data = JSON.parse(readFileSync(tempPath, 'utf8'));
+    data.client_response_watchdog.enabled = false;
+    writeFileSync(tempPath, JSON.stringify(data));
+    process.env.CONVENTIONS_PATH = tempPath;
+    resetConventionsCache();
+    try {
+      const client = makeClient();
+      pendingClientMessages.recordClientMessage(EXTERNAL_CHANNEL, {
+        clientKey: 'example-client',
+        messageTs: '1.0',
+        snippet: 'hi',
+      });
+      await handleClientResponseAck({ client, event: makeReactionEvent(), logger: makeLogger() });
+      assert.ok(pendingClientMessages.get(EXTERNAL_CHANNEL));
+    } finally {
+      process.env.CONVENTIONS_PATH = FIXTURE_PATH;
+      resetConventionsCache();
+    }
+  });
+
+  it('honors a custom ack_emoji list from config', async () => {
+    const tempPath = join(tempDir, 'custom-ack.json');
+    copyFileSync(FIXTURE_PATH, tempPath);
+    const data = JSON.parse(readFileSync(tempPath, 'utf8'));
+    data.client_response_watchdog.ack_emoji = ['eyes'];
+    writeFileSync(tempPath, JSON.stringify(data));
+    process.env.CONVENTIONS_PATH = tempPath;
+    resetConventionsCache();
+    try {
+      const client = makeClient();
+      await handleClientResponseWatchdog({ client, event: makeEvent({ ts: '1.0' }), logger: makeLogger() });
+
+      // Default thumbsup no longer counts once the list is overridden.
+      await handleClientResponseAck({ client, event: makeReactionEvent(), logger: makeLogger() });
+      assert.ok(pendingClientMessages.get(EXTERNAL_CHANNEL));
+
+      await handleClientResponseAck({
+        client,
+        event: makeReactionEvent({ reaction: 'eyes' }),
+        logger: makeLogger(),
+      });
       assert.strictEqual(pendingClientMessages.get(EXTERNAL_CHANNEL), undefined);
     } finally {
       process.env.CONVENTIONS_PATH = FIXTURE_PATH;
