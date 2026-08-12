@@ -40,7 +40,7 @@ describe('handleAppMentioned default-deny', () => {
         }),
       },
     };
-    fakeContext = { userId: 'U0000000LEAD' };
+    fakeContext = { userId: 'U0000000LEAD', botUserId: 'U0BOT' };
     fakeLogger = { info: mock.fn(), error: mock.fn() };
     fakeSay = mock.fn(async () => ({ ok: true }));
     fakeSetStatus = mock.fn(async () => {});
@@ -114,6 +114,70 @@ describe('handleAppMentioned default-deny', () => {
     await handleAppMentioned({
       client: fakeClient,
       context: fakeContext,
+      event: event(INTERNAL_CHANNEL, '<@U0BOT>'),
+      logger: fakeLogger,
+      say: fakeSay,
+      sayStream: mock.fn(),
+      setStatus: fakeSetStatus,
+    });
+    assert.strictEqual(fakeSay.mock.callCount(), 1);
+  });
+
+  it('stays silent when the bot is only referenced mid-message, not addressed at the start', async () => {
+    const text =
+      'Hi team, quick heads up on timelines. @Arjun perfect time to leverage <@U0BOT> for the client updates.';
+    await handleAppMentioned({
+      client: fakeClient,
+      context: fakeContext,
+      event: event(INTERNAL_CHANNEL, text),
+      logger: fakeLogger,
+      say: fakeSay,
+      sayStream: mock.fn(),
+      setStatus: fakeSetStatus,
+    });
+    assert.strictEqual(fakeSay.mock.callCount(), 0);
+    assert.strictEqual(fakeClient.reactions.add.mock.callCount(), 0);
+    assert.strictEqual(fakeLogger.info.mock.callCount(), 1);
+    assert.match(fakeLogger.info.mock.calls[0].arguments[0], /only referenced, not addressed at the start/);
+  });
+
+  it('does not even reach the client-channel guard when the bot is only referenced mid-message', async () => {
+    // Cheap text check runs before any Slack API call — conversations.info
+    // (used by the channel guard) must never be hit for a passing mention.
+    const text = 'Great update <@U0BOT> would be handy here but no need right now.';
+    await handleAppMentioned({
+      client: fakeClient,
+      context: fakeContext,
+      event: event(CLIENT_CHANNEL, text),
+      logger: fakeLogger,
+      say: fakeSay,
+      sayStream: mock.fn(),
+      setStatus: fakeSetStatus,
+    });
+    assert.strictEqual(fakeSay.mock.callCount(), 0);
+    assert.strictEqual(fakeClient.conversations.info.mock.callCount(), 0);
+  });
+
+  it('treats a leading block mentioning another person alongside the bot as directed at the bot', async () => {
+    await handleAppMentioned({
+      client: fakeClient,
+      context: fakeContext,
+      event: event(INTERNAL_CHANNEL, '<@U0SOMEUSER> <@U0BOT>'),
+      logger: fakeLogger,
+      say: fakeSay,
+      sayStream: mock.fn(),
+      setStatus: fakeSetStatus,
+    });
+    // Both mentions get stripped, leaving empty text → the greeting fallback,
+    // proving it passed the "directed at bot" gate rather than being ignored.
+    assert.strictEqual(fakeSay.mock.callCount(), 1);
+  });
+
+  it('falls back to treating any leading mention as directed at the bot when botUserId is unavailable', async () => {
+    const contextWithoutBotId = { userId: 'U0000000LEAD' };
+    await handleAppMentioned({
+      client: fakeClient,
+      context: contextWithoutBotId,
       event: event(INTERNAL_CHANNEL, '<@U0BOT>'),
       logger: fakeLogger,
       say: fakeSay,
