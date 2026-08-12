@@ -52,6 +52,11 @@ export async function handleClientResponseWatchdog({ client, event, logger }) {
     if (ctx.kind !== 'client-external' || !ctx.clientKey) return;
 
     if (conventions.users[e.user]) {
+      const pending = pendingClientMessages.get(e.channel);
+      if (pending) {
+        const waitedMin = Math.round((Date.now() - pending.firstSeenAt) / 60000);
+        logger.info(`Response watchdog cleared for ${ctx.clientKey} — team reply after ${waitedMin}m unanswered.`);
+      }
       pendingClientMessages.clearChannel(e.channel);
       return;
     }
@@ -62,11 +67,15 @@ export async function handleClientResponseWatchdog({ client, event, logger }) {
     const internalChannelId = conventions.clients[ctx.clientKey]?.internal_channel_id;
     if (isPlaceholderId(internalChannelId)) return;
 
+    const isNewEntry = !pendingClientMessages.get(e.channel);
     pendingClientMessages.recordClientMessage(e.channel, {
       clientKey: ctx.clientKey,
       messageTs: e.ts,
       snippet: snippet(e.text || '') || (e.files?.length ? '[attachment, no text]' : ''),
     });
+    if (isNewEntry) {
+      logger.info(`Response watchdog started tracking ${ctx.clientKey} in ${e.channel} (clock starts now).`);
+    }
   } catch (err) {
     logger.error(`Client response watchdog tracking failed: ${err}`);
   }

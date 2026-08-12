@@ -92,7 +92,10 @@ export async function checkPendingClientMessages(client, logger) {
         unfurl_media: false,
       });
       pendingClientMessages.markAlerted(channelId);
-      logger.info(`Response watchdog reminder sent for ${entry.clientKey}.`);
+      const waitedHours = ((Date.now() - entry.firstSeenAt) / (60 * 60 * 1000)).toFixed(1);
+      logger.info(
+        `Response watchdog reminder sent for ${entry.clientKey} (waited ${waitedHours}h, threshold ${thresholdHours}h, firstSeenAt ${new Date(entry.firstSeenAt).toISOString()}).`,
+      );
     } catch (e) {
       logger.error(`Response watchdog reminder failed for ${entry.clientKey}: ${e}`);
     }
