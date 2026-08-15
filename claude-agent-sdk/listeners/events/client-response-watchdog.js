@@ -1,6 +1,7 @@
 import { loadConventions } from '../../config/index.js';
 import { isPlaceholderId, resolveChannelContext } from '../../config/resolver.js';
 import { pendingClientMessages } from '../../thread-context/index.js';
+import { categoryRequiresResponse, classifyClientMessage } from './client-message-classifier.js';
 import { isProcessableMessage } from './message.js';
 
 /**
@@ -9,10 +10,12 @@ import { isProcessableMessage } from './message.js';
  * client's INTERNAL channel after
  * `conventions.client_response_watchdog.threshold_hours` of silence.
  *
- * Deterministic, no model call, and this module never posts anywhere itself —
- * it only updates `pendingClientMessages`, which the scheduler reads. That
- * keeps it inside the "bot never speaks in a client channel" rule: watching a
- * channel is not the same as speaking in it.
+ * A single-turn Claude classification gates client messages before they enter
+ * `pendingClientMessages`. Only clear requests, questions, follow-ups, and
+ * actionable feedback are tracked; acknowledgements, thanks, praise, FYIs,
+ * and link/file shares without an ask are ignored. This module never posts
+ * anywhere itself, so watching a channel still cannot make the bot speak in a
+ * client channel.
  *
  * "Team member" is decided by `conventions.users` (the same roster every
  * other permission check uses) — anyone else posting in the channel is
@@ -34,6 +37,35 @@ const SNIPPET_MAX_CHARS = 200;
 /** Reaction names (Slack's canonical `name`, no colons) that count as "acknowledged". */
 const DEFAULT_ACK_EMOJI = ['+1', 'thumbsup', 'white_check_mark', 'heavy_check_mark', 'ballot_box_with_check'];
 
+// A Claude call makes client-message handling asynchronous. Remember replies
+// and acknowledgements so a slow classification cannot recreate a pending
+// entry after the team has already responded.
+/** @type {Map<string, string>} */
+const latestTeamReplyTs = new Map();
+/** @type {Set<string>} */
+const acknowledgedClientMessages = new Set();
+const MAX_REMEMBERED_ACKS = 1000;
+
+/** @param {string} channelId @param {string} messageTs @returns {string} */
+function acknowledgementKey(channelId, messageTs) {
+  return `${channelId}:${messageTs}`;
+}
+
+/** @param {string} channelId @param {string} messageTs */
+function rememberAcknowledgement(channelId, messageTs) {
+  acknowledgedClientMessages.add(acknowledgementKey(channelId, messageTs));
+  if (acknowledgedClientMessages.size > MAX_REMEMBERED_ACKS) {
+    const oldest = acknowledgedClientMessages.values().next().value;
+    if (oldest) acknowledgedClientMessages.delete(oldest);
+  }
+}
+
+/** Reset async ordering state between tests. */
+export function resetClientResponseWatchdogState() {
+  latestTeamReplyTs.clear();
+  acknowledgedClientMessages.clear();
+}
+
 /**
  * @param {string} text
  * @returns {string}
@@ -45,10 +77,10 @@ function snippet(text) {
 }
 
 /**
- * @param {import('@slack/bolt').AllMiddlewareArgs & import('@slack/bolt').SlackEventMiddlewareArgs<'message'>} args
+ * @param {import('@slack/bolt').AllMiddlewareArgs & import('@slack/bolt').SlackEventMiddlewareArgs<'message'> & { classifyMessage?: typeof classifyClientMessage }} args
  * @returns {Promise<void>}
  */
-export async function handleClientResponseWatchdog({ client, event, logger }) {
+export async function handleClientResponseWatchdog({ client, event, logger, classifyMessage = classifyClientMessage }) {
   try {
     const conventions = loadConventions();
     const watchdog = conventions.client_response_watchdog;
@@ -63,6 +95,7 @@ export async function handleClientResponseWatchdog({ client, event, logger }) {
     if (ctx.kind !== 'client-external' || !ctx.clientKey) return;
 
     if (conventions.users[e.user]) {
+      latestTeamReplyTs.set(e.channel, e.ts);
       const pending = pendingClientMessages.get(e.channel);
       if (pending) {
         const waitedMin = Math.round((Date.now() - pending.firstSeenAt) / 60000);
@@ -78,6 +111,26 @@ export async function handleClientResponseWatchdog({ client, event, logger }) {
     const internalChannelId = conventions.clients[ctx.clientKey]?.internal_channel_id;
     if (isPlaceholderId(internalChannelId)) return;
 
+    const category = await classifyMessage({
+      text: e.text || '',
+      hasAttachments: Boolean(e.files?.length),
+    });
+    const ackKey = acknowledgementKey(e.channel, e.ts);
+    if (!categoryRequiresResponse(category)) {
+      acknowledgedClientMessages.delete(ackKey);
+      logger.info(`Response watchdog ignored a ${category.toLowerCase()} message for ${ctx.clientKey}.`);
+      return;
+    }
+
+    const teamReplyTs = latestTeamReplyTs.get(e.channel);
+    if (acknowledgedClientMessages.delete(ackKey) || (teamReplyTs && Number(teamReplyTs) >= Number(e.ts))) {
+      logger.info(
+        `Response watchdog skipped a classified ${category.toLowerCase()} for ${ctx.clientKey} — already answered.`,
+      );
+      return;
+    }
+    if (teamReplyTs) latestTeamReplyTs.delete(e.channel);
+
     const isNewEntry = !pendingClientMessages.get(e.channel);
     pendingClientMessages.recordClientMessage(e.channel, {
       clientKey: ctx.clientKey,
@@ -85,7 +138,9 @@ export async function handleClientResponseWatchdog({ client, event, logger }) {
       snippet: snippet(e.text || '') || (e.files?.length ? '[attachment, no text]' : ''),
     });
     if (isNewEntry) {
-      logger.info(`Response watchdog started tracking ${ctx.clientKey} in ${e.channel} (clock starts now).`);
+      logger.info(
+        `Response watchdog started tracking ${ctx.clientKey} in ${e.channel} as ${category.toLowerCase()} (clock starts now).`,
+      );
     }
   } catch (err) {
     logger.error(`Client response watchdog tracking failed: ${err}`);
@@ -115,6 +170,13 @@ export async function handleClientResponseAck({ client, event, logger }) {
     const ackEmoji = new Set(watchdog.ack_emoji || DEFAULT_ACK_EMOJI);
     if (!ackEmoji.has(e.reaction)) return;
 
+    const ctx = await resolveChannelContext({ client, conventions, channelId: e.item.channel });
+    if (ctx.kind !== 'client-external' || !ctx.clientKey) return;
+
+    // Remember an acknowledgement even if the model call for that client
+    // message is still in flight and no pending entry exists yet.
+    rememberAcknowledgement(e.item.channel, e.item.ts);
+
     const pending = pendingClientMessages.get(e.item.channel);
     if (!pending) return;
 
@@ -122,9 +184,6 @@ export async function handleClientResponseAck({ client, event, logger }) {
     // the channel — counts, so an unrelated reaction can never clear a
     // reminder it wasn't about.
     if (e.item.ts !== pending.firstMessageTs && e.item.ts !== pending.latestMessageTs) return;
-
-    const ctx = await resolveChannelContext({ client, conventions, channelId: e.item.channel });
-    if (ctx.kind !== 'client-external' || !ctx.clientKey) return;
 
     const waitedMin = Math.round((Date.now() - pending.firstSeenAt) / 60000);
     pendingClientMessages.clearChannel(e.item.channel);

@@ -13,7 +13,8 @@ import { resetConventionsCache } from '../../../config/index.js';
 import { resetResolverCache } from '../../../config/resolver.js';
 import {
   handleClientResponseAck,
-  handleClientResponseWatchdog,
+  handleClientResponseWatchdog as handleClientResponseWatchdogImpl,
+  resetClientResponseWatchdogState,
 } from '../../../listeners/events/client-response-watchdog.js';
 import { pendingClientMessages } from '../../../thread-context/index.js';
 
@@ -48,10 +49,18 @@ function makeEvent(overrides = {}) {
   return { channel: EXTERNAL_CHANNEL, ts: '1.0', user: CLIENT_USER_ID, text: 'hi, any update?', ...overrides };
 }
 
+function handleClientResponseWatchdog(args) {
+  return handleClientResponseWatchdogImpl({
+    ...args,
+    classifyMessage: args.classifyMessage || (async () => 'QUESTION'),
+  });
+}
+
 describe('handleClientResponseWatchdog', () => {
   beforeEach(() => {
     resetConventionsCache();
     resetResolverCache();
+    resetClientResponseWatchdogState();
     pendingClientMessages.clear();
   });
 
@@ -61,6 +70,154 @@ describe('handleClientResponseWatchdog', () => {
     const entry = pendingClientMessages.get(EXTERNAL_CHANNEL);
     assert.strictEqual(entry?.clientKey, 'example-client');
     assert.strictEqual(entry?.snippet, 'hi, any update?');
+  });
+
+  it('ignores acknowledgements, praise, and link shares that Claude says need no response', async () => {
+    const client = makeClient();
+    const messages = [
+      'These are beautiful- thank you so much <@U123>!',
+      '<@U123> here you go: <https://www.figma.com/design/example>',
+      'Thanks!',
+      'Okay, got it',
+    ];
+
+    for (const [index, text] of messages.entries()) {
+      const classifyMessage = mock.fn(async () => 'NO_RESPONSE_NEEDED');
+      await handleClientResponseWatchdog({
+        client,
+        event: makeEvent({ ts: `${index + 2}.0`, text }),
+        logger: makeLogger(),
+        classifyMessage,
+      });
+      assert.strictEqual(classifyMessage.mock.callCount(), 1);
+      assert.strictEqual(classifyMessage.mock.calls[0].arguments[0].text, text);
+      assert.strictEqual(pendingClientMessages.get(EXTERNAL_CHANNEL), undefined);
+    }
+  });
+
+  it('tracks every Claude category that clearly requires a response', async () => {
+    const client = makeClient();
+    const categories = ['REQUEST', 'QUESTION', 'FOLLOW_UP', 'ACTIONABLE_FEEDBACK'];
+
+    for (const [index, category] of categories.entries()) {
+      await handleClientResponseWatchdog({
+        client,
+        event: makeEvent({ ts: `${index + 2}.0` }),
+        logger: makeLogger(),
+        classifyMessage: async () => category,
+      });
+      assert.ok(pendingClientMessages.get(EXTERNAL_CHANNEL));
+      pendingClientMessages.clear();
+    }
+  });
+
+  it('keeps an existing real ask when a later acknowledgement needs no response', async () => {
+    const client = makeClient();
+    await handleClientResponseWatchdog({
+      client,
+      event: makeEvent({ ts: '1.0', text: 'Can you send the updated homepage today?' }),
+      logger: makeLogger(),
+      classifyMessage: async () => 'REQUEST',
+    });
+    await handleClientResponseWatchdog({
+      client,
+      event: makeEvent({ ts: '2.0', text: 'Thanks!' }),
+      logger: makeLogger(),
+      classifyMessage: async () => 'NO_RESPONSE_NEEDED',
+    });
+
+    const entry = pendingClientMessages.get(EXTERNAL_CHANNEL);
+    assert.strictEqual(entry?.firstMessageTs, '1.0');
+    assert.strictEqual(entry?.latestMessageTs, '1.0');
+    assert.strictEqual(entry?.snippet, 'Can you send the updated homepage today?');
+  });
+
+  it('fails closed when Claude classification fails', async () => {
+    const client = makeClient();
+    const logger = makeLogger();
+    await handleClientResponseWatchdog({
+      client,
+      event: makeEvent(),
+      logger,
+      classifyMessage: async () => {
+        throw new Error('API unavailable');
+      },
+    });
+
+    assert.strictEqual(pendingClientMessages.get(EXTERNAL_CHANNEL), undefined);
+    assert.strictEqual(logger.error.mock.callCount(), 1);
+    assert.match(logger.error.mock.calls[0].arguments[0], /API unavailable/);
+  });
+
+  it('does not recreate a pending entry when a team reply lands during classification', async () => {
+    const client = makeClient();
+    /** @type {(category: string) => void} */
+    let finishClassification;
+    const classification = new Promise((resolve) => {
+      finishClassification = resolve;
+    });
+    const clientHandling = handleClientResponseWatchdog({
+      client,
+      event: makeEvent({ ts: '1.0' }),
+      logger: makeLogger(),
+      classifyMessage: async () => classification,
+    });
+
+    await handleClientResponseWatchdog({
+      client,
+      event: makeEvent({ ts: '2.0', user: MEMBER_ID, text: 'On it' }),
+      logger: makeLogger(),
+    });
+    finishClassification('QUESTION');
+    await clientHandling;
+
+    assert.strictEqual(pendingClientMessages.get(EXTERNAL_CHANNEL), undefined);
+  });
+
+  it('does not create a pending entry when a team acknowledgement lands during classification', async () => {
+    const client = makeClient();
+    /** @type {(category: string) => void} */
+    let finishClassification;
+    const classification = new Promise((resolve) => {
+      finishClassification = resolve;
+    });
+    const clientHandling = handleClientResponseWatchdog({
+      client,
+      event: makeEvent({ ts: '1.0' }),
+      logger: makeLogger(),
+      classifyMessage: async () => classification,
+    });
+
+    await handleClientResponseAck({ client, event: makeReactionEvent(), logger: makeLogger() });
+    finishClassification('QUESTION');
+    await clientHandling;
+
+    assert.strictEqual(pendingClientMessages.get(EXTERNAL_CHANNEL), undefined);
+  });
+
+  it('does not treat an acknowledgement on another message as a reply to an in-flight ask', async () => {
+    const client = makeClient();
+    /** @type {(category: string) => void} */
+    let finishClassification;
+    const classification = new Promise((resolve) => {
+      finishClassification = resolve;
+    });
+    const clientHandling = handleClientResponseWatchdog({
+      client,
+      event: makeEvent({ ts: '1.0' }),
+      logger: makeLogger(),
+      classifyMessage: async () => classification,
+    });
+
+    await handleClientResponseAck({
+      client,
+      event: makeReactionEvent({ item: { type: 'message', channel: EXTERNAL_CHANNEL, ts: '2.0' } }),
+      logger: makeLogger(),
+    });
+    finishClassification('QUESTION');
+    await clientHandling;
+
+    assert.ok(pendingClientMessages.get(EXTERNAL_CHANNEL));
   });
 
   it('clears a pending entry when a team member posts afterward', async () => {
@@ -177,6 +334,7 @@ describe('handleClientResponseAck', () => {
   beforeEach(() => {
     resetConventionsCache();
     resetResolverCache();
+    resetClientResponseWatchdogState();
     pendingClientMessages.clear();
   });
 

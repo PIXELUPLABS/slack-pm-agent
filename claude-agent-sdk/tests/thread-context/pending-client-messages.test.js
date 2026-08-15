@@ -33,6 +33,15 @@ describe('PendingClientMessageStore', () => {
     assert.strictEqual(entry?.snippet, 'second');
   });
 
+  it('preserves Slack chronology when classifications finish out of order', () => {
+    store.recordClientMessage('C1', { clientKey: 'acme', messageTs: '2.0', snippet: 'newer' });
+    store.recordClientMessage('C1', { clientKey: 'acme', messageTs: '1.0', snippet: 'older' });
+
+    assert.strictEqual(store.get('C1')?.firstMessageTs, '1.0');
+    assert.strictEqual(store.get('C1')?.latestMessageTs, '2.0');
+    assert.strictEqual(store.get('C1')?.snippet, 'newer');
+  });
+
   it('clears a channel once a team member responds', () => {
     store.recordClientMessage('C1', { clientKey: 'acme', messageTs: '1.0', snippet: 'hello' });
     store.clearChannel('C1');

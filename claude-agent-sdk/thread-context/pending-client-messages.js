@@ -11,11 +11,11 @@
 
 /**
  * Tracks, per client-external channel, whether the client is waiting on a
- * reply. `listeners/events/client-response-watchdog.js` writes to this on
- * every message; `schedules/response-watchdog.js` reads it on a timer. A
- * team-member message anywhere in the channel clears the entry — the clock
- * only ever runs while the client's most recent message has had zero replies
- * from the team.
+ * reply. `listeners/events/client-response-watchdog.js` writes to this after
+ * Claude classifies a client message as needing a response;
+ * `schedules/response-watchdog.js` reads it on a timer. A team-member message
+ * anywhere in the channel clears the entry — the clock only ever runs while
+ * a genuine client ask has had zero replies from the team.
  *
  * In-memory only, same tradeoff as SessionStore: a restart forgets anything
  * still pending, and a client with an unanswered message during a restart
@@ -44,8 +44,15 @@ export class PendingClientMessageStore {
   recordClientMessage(channelId, { clientKey, messageTs, snippet }) {
     const existing = this._store.get(channelId);
     if (existing) {
-      existing.latestMessageTs = messageTs;
-      existing.snippet = snippet;
+      // Model calls for rapid messages can finish out of order. Preserve the
+      // actual Slack chronology rather than classification completion order.
+      if (Number(messageTs) < Number(existing.firstMessageTs)) {
+        existing.firstMessageTs = messageTs;
+      }
+      if (Number(messageTs) >= Number(existing.latestMessageTs)) {
+        existing.latestMessageTs = messageTs;
+        existing.snippet = snippet;
+      }
       return;
     }
     this._store.set(channelId, {
