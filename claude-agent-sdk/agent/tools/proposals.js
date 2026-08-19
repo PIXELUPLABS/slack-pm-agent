@@ -42,6 +42,52 @@ function cleanReferences(urls) {
 }
 
 /**
+ * Strip channel-wide broadcast pings. The bot writes reminders on someone's
+ * behalf; a misread instruction must never be able to ping a whole channel.
+ * Slack's raw forms (`<!here>`, `<!channel>`, `<!everyone>`) and the literal
+ * text a model is likely to type are both removed.
+ * @param {string} text
+ * @returns {{ text: string, stripped: boolean }}
+ */
+function stripBroadcasts(text) {
+  const cleaned = String(text || '')
+    .replace(/<!(here|channel|everyone)(\|[^>]*)?>/gi, '')
+    .replace(/(^|\s)@(here|channel|everyone)\b/gi, '$1')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
+  return { text: cleaned, stripped: cleaned !== String(text || '').trim() };
+}
+
+/**
+ * Mentions are rendered in code, never by the model — a model that types
+ * "@farhan" as literal text notifies nobody, which is exactly how this failed
+ * before. Slack is the source of truth for who is a real user, so an ID absent
+ * from `conventions.users` is still mentioned; config only supplies the display
+ * name shown on the approval card.
+ * @param {string[] | undefined} ids
+ * @param {import('../../config/index.js').Conventions} conventions
+ * @returns {{ ids: string[], names: string[], prefix: string }}
+ */
+function renderMentions(ids, conventions) {
+  const clean = [
+    ...new Set(
+      (Array.isArray(ids) ? ids : [])
+        // Accept a bare ID or a already-wrapped <@ID> — both arrive in practice.
+        .map(
+          (id) =>
+            String(id)
+              .trim()
+              .replace(/^<@|>$/g, '')
+              .split('|')[0],
+        )
+        .filter((id) => /^[UW][A-Z0-9]{2,}$/.test(id)),
+    ),
+  ];
+  const names = clean.map((id) => conventions.users[id]?.name || `${id} (not in the team roster)`);
+  return { ids: clean, names, prefix: clean.map((id) => `<@${id}>`).join(' ') };
+}
+
+/**
  * Unregistered-client alerts already sent, client key → epoch ms. Deduped so a
  * designer iterating on a draft (several canvas proposals in an afternoon)
  * pings the configured lead once, not once per proposal.
@@ -588,6 +634,58 @@ export function createProposalTools(deps, conventions) {
     },
   );
 
+  const proposeChannelMessage = tool(
+    'propose_channel_message',
+    'Post a plain message in an INTERNAL Slack channel — reminders, nudges, heads-ups, "tell the team X". ' +
+      'Use this, NOT propose_canvas_update, whenever the point is for people to SEE or be PINGED by something: a ' +
+      'canvas edit is a silent document change that notifies nobody. Target an internal channel ' +
+      '("{key}-internal"), a channel name, or a channel ID — never a client channel. Put the people to ping in ' +
+      'mention_slack_ids (Slack IDs, as they appear in the message you read) and write text WITHOUT their names — ' +
+      'code prepends the mentions so they actually notify. Never write "@name" yourself.',
+    {
+      channel: z.string().describe('Internal channel ("{key}-internal"), channel name, or channel ID.'),
+      text: z.string().max(3000).describe('The message body. Do NOT include @mentions — use mention_slack_ids.'),
+      mention_slack_ids: z
+        .array(z.string())
+        .max(20)
+        .optional()
+        .describe('Slack IDs to ping, copied exactly from the message you read. Code renders them as mentions.'),
+      thread_ts: z
+        .string()
+        .optional()
+        .describe('Post as a reply in this existing thread instead of as a new channel message.'),
+    },
+    async ({ channel, text, mention_slack_ids, thread_ts }) => {
+      const resolved = resolveChannelArg(conventions, channel);
+      let channelId = resolved.id;
+      if (!channelId && resolved.lookupName) {
+        channelId = await lookupChannelIdByName(deps.client, resolved.lookupName);
+      }
+      if (!channelId) {
+        return asResult(`No channel matching "${channel}" is visible to the bot.`);
+      }
+      // Hard rule, re-checked at execute time too: by channel NAME, fail-closed.
+      const target = await canBotPostInChannel({ client: deps.client, conventions, channelId });
+      if (!target.allowed) {
+        return asResult(`Refused: the bot never posts in client channels (${target.reason}).`);
+      }
+      const body = stripBroadcasts(text);
+      if (!body.text) {
+        return asResult('Refused: the message is empty once channel-wide pings are removed.');
+      }
+      const mentions = renderMentions(mention_slack_ids, conventions);
+      return postProposal('channel_message', {
+        channelId,
+        channelLabel: channel,
+        text: body.text,
+        mentionIds: mentions.ids,
+        mentionNames: mentions.names,
+        ...(thread_ts ? { threadTs: thread_ts } : {}),
+        ...(body.stripped ? { broadcastStripped: true } : {}),
+      });
+    },
+  );
+
   return [
     proposeTask,
     proposeTaskUpdate,
@@ -599,5 +697,6 @@ export function createProposalTools(deps, conventions) {
     proposeAutomationIdea,
     proposePmAgentIssue,
     proposeCanvasUpdate,
+    proposeChannelMessage,
   ];
 }

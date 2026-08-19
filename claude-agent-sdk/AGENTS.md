@@ -102,7 +102,7 @@ The agent is defined in `agent/pixelup.js`:
 
 ### Approval pipeline
 
-Agent `propose_*` tool → structured JSON in `approvals/store.js` → Block Kit card (`approvals/card-builder.js`) → Approve/Reject buttons (`listeners/actions/approval-buttons.js`, permission-checked against config roles) → `approvals/executor.js` performs the ClickUp write deterministically via `integrations/clickup-mcp.js` (an MCP client calling named create/update tools — no delete calls exist). Client updates execute as a no-op: approval marks the draft ready for a human to send.
+Agent `propose_*` tool → structured JSON in `approvals/store.js` → Block Kit card (`approvals/card-builder.js`) → Approve/Reject buttons (`listeners/actions/approval-buttons.js`, permission-checked against config roles) → `approvals/executor.js` performs the ClickUp write deterministically via `integrations/clickup-mcp.js` (an MCP client calling named create/update tools — no delete calls exist). Client updates execute as a no-op: approval marks the draft ready for a human to send. Two proposal types write to Slack rather than ClickUp — `canvas_update` (channel canvas) and `channel_message` (a plain message in an internal channel, for reminders and heads-ups). Both re-check `canBotPostInChannel` in the executor, and `channel_message` renders its `<@ID>` mentions there from IDs code validated at propose time.
 
 ### Conversation Management
 

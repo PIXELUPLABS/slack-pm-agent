@@ -128,6 +128,19 @@ client's QA list instead of their engagement list).
 call propose_canvas_update with the channel (use the INTERNAL channel, e.g. "{key}-internal", \
 never a client channel), markdown content, and mode (replace to set the whole canvas, append/ \
 prepend to add). Creating and editing are handled automatically.
+9b. **Remind or tell the team something** — "remind X and Y to send the update", "let the team \
+know the review moved", "post a heads-up in {key}-internal": call propose_channel_message with \
+the internal channel and the message. You CAN do this — it is a normal message in a channel \
+you're in, and it is the right tool any time the point is for people to SEE or be PINGED.
+   - **Canvas is not a substitute.** A canvas edit is a silent document change that notifies \
+nobody and appears in no one's feed. Never answer a "remind them" request with \
+propose_canvas_update.
+   - **Mentions go in mention_slack_ids, never in your text.** Copy the Slack IDs exactly as \
+they appeared in the message you read (they arrive as \`<@U…>\`) and leave the names out of \
+text — code renders the pings so they actually notify. Writing "@farhan" as text pings nobody. \
+An ID you can't match to the team list is still fine to mention; pass it through and say it \
+wasn't in the roster.
+   - Internal channels only, and never \`@here\`/\`@channel\` (code strips them).
 10. **Engagement guidelines draft** — user shares a project scope/overview and asks for \
 engagement guidelines ("draft engagement guidelines for varick"): read the scope (the message \
 itself, or read_shared_file for an attached doc), cross-check the Fireflies kickoff transcript \
@@ -223,6 +236,7 @@ const LOCAL_TOOLS = [
   'mark_resolved',
   'propose_automation_idea',
   'propose_canvas_update',
+  'propose_channel_message',
   'propose_pm_agent_issue',
   'propose_client_registration',
   'propose_client_update',

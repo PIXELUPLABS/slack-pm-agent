@@ -70,6 +70,10 @@ function fakeSlack({ existingCanvasId = null, name = 'pixelup-team' } = {}) {
     canvases: {
       edit: mock.fn(async () => ({ ok: true })),
     },
+    chat: {
+      postMessage: mock.fn(async (/** @type {any} */ args) => ({ ok: true, channel: args.channel, ts: '1.2' })),
+      getPermalink: mock.fn(async () => ({ ok: true, permalink: 'https://slack.test/p1' })),
+    },
   };
 }
 
@@ -386,6 +390,73 @@ describe('executeProposal', () => {
 
   it('canvas_update: fails clearly without a Slack client', async () => {
     const p = proposal({ type: 'canvas_update', payload: { channelId: 'C0INT', markdown: 'x' } });
+    await assert.rejects(() => executeProposal(p, conventions(), fakeClickUp, undefined), /require the Slack client/);
+  });
+
+  it('channel_message: posts to the internal channel with mentions prepended', async () => {
+    const slack = fakeSlack();
+    const p = proposal({
+      type: 'channel_message',
+      payload: {
+        channelId: 'C0INT',
+        text: 'please drop a Varick update',
+        mentionIds: ['U0FARHAN', 'U0KRISH'],
+        mentionNames: ['Farhan', 'Krish Savani'],
+      },
+    });
+    const result = await executeProposal(p, conventions(), fakeClickUp, slack);
+    assert.strictEqual(slack.chat.postMessage.mock.callCount(), 1);
+    const arg = slack.chat.postMessage.mock.calls[0].arguments[0];
+    assert.strictEqual(arg.channel, 'C0INT');
+    // Mentions are rendered here, from IDs — this is what actually notifies.
+    assert.strictEqual(arg.text, '<@U0FARHAN> <@U0KRISH> please drop a Varick update');
+    assert.strictEqual(arg.thread_ts, undefined);
+    assert.match(result.summary, /Farhan, Krish Savani/);
+    assert.match(result.summary, /Posted in <#C0INT> \(<https:\/\/slack\.test\/p1\|view>\)/);
+  });
+
+  it('channel_message: posts without a mention prefix when nobody is tagged', async () => {
+    const slack = fakeSlack();
+    const p = proposal({ type: 'channel_message', payload: { channelId: 'C0INT', text: 'standup moved to 10' } });
+    await executeProposal(p, conventions(), fakeClickUp, slack);
+    assert.strictEqual(slack.chat.postMessage.mock.calls[0].arguments[0].text, 'standup moved to 10');
+  });
+
+  it('channel_message: replies in a thread when threadTs is set', async () => {
+    const slack = fakeSlack();
+    const p = proposal({ type: 'channel_message', payload: { channelId: 'C0INT', text: 'bump', threadTs: '9.9' } });
+    await executeProposal(p, conventions(), fakeClickUp, slack);
+    assert.strictEqual(slack.chat.postMessage.mock.calls[0].arguments[0].thread_ts, '9.9');
+  });
+
+  it('channel_message: refuses a client channel', async () => {
+    const slack = fakeSlack();
+    const p = proposal({ type: 'channel_message', payload: { channelId: 'C0ACME', text: 'hello' } });
+    await assert.rejects(() => executeProposal(p, conventions(), fakeClickUp, slack), /never posts in client channels/);
+    assert.strictEqual(slack.chat.postMessage.mock.callCount(), 0);
+  });
+
+  it('channel_message: refuses a channel it cannot identify (fail-closed)', async () => {
+    // A channel Slack won't name at all — the guard must refuse, not assume.
+    const slack = fakeSlack({ name: null });
+    const p = proposal({ type: 'channel_message', payload: { channelId: 'C0MYSTERY', text: 'hello' } });
+    await assert.rejects(() => executeProposal(p, conventions(), fakeClickUp, slack), /never posts in client channels/);
+    assert.strictEqual(slack.chat.postMessage.mock.callCount(), 0);
+  });
+
+  it('channel_message: still reports success when the permalink lookup fails', async () => {
+    const slack = fakeSlack();
+    slack.chat.getPermalink = mock.fn(async () => {
+      throw new Error('permalink unavailable');
+    });
+    const p = proposal({ type: 'channel_message', payload: { channelId: 'C0INT', text: 'ok' } });
+    const result = await executeProposal(p, conventions(), fakeClickUp, slack);
+    assert.strictEqual(slack.chat.postMessage.mock.callCount(), 1);
+    assert.match(result.summary, /Posted in <#C0INT>/);
+  });
+
+  it('channel_message: fails clearly without a Slack client', async () => {
+    const p = proposal({ type: 'channel_message', payload: { channelId: 'C0INT', text: 'x' } });
     await assert.rejects(() => executeProposal(p, conventions(), fakeClickUp, undefined), /require the Slack client/);
   });
 

@@ -487,6 +487,43 @@ export async function executeProposal(proposal, conventions, clickup = clickupDe
       return { summary: `Canvas created in <#${channelId}>.` };
     }
 
+    case 'channel_message': {
+      if (!slack) throw new Error('Channel messages require the Slack client (internal error).');
+      const channelId = p.channelId;
+      // Hard rule: the bot never posts in client channels. Guarded at propose
+      // time too, but re-checked here in code — by channel name, fail-closed,
+      // so an unmapped client channel is refused rather than waved through.
+      const target = await canBotPostInChannel({ client: slack, conventions, channelId });
+      if (!target.allowed) {
+        throw new Error(`Refused: the bot never posts in client channels (${target.reason}).`);
+      }
+      // Mentions are prepended here, from IDs code validated at propose time —
+      // the model never gets to hand us mention markup.
+      const mentionPrefix =
+        Array.isArray(p.mentionIds) && p.mentionIds.length > 0
+          ? `${p.mentionIds.map((/** @type {string} */ id) => `<@${id}>`).join(' ')} `
+          : '';
+      const posted = await slack.chat.postMessage({
+        channel: channelId,
+        text: `${mentionPrefix}${p.text}`,
+        ...(p.threadTs ? { thread_ts: p.threadTs } : {}),
+      });
+      // A `<#C…>` mention can't be nested inside a link label, so the permalink
+      // rides alongside the channel mention rather than wrapping it.
+      let jump = '';
+      try {
+        const permalink = await slack.chat.getPermalink({
+          channel: /** @type {string} */ (posted.channel),
+          message_ts: /** @type {string} */ (posted.ts),
+        });
+        if (permalink?.permalink) jump = ` (<${permalink.permalink}|view>)`;
+      } catch {
+        // The message is already posted; a missing permalink is cosmetic.
+      }
+      const who = p.mentionNames?.length ? `, pinging ${p.mentionNames.join(', ')}` : '';
+      return { summary: `Posted in <#${channelId}>${jump}${who}.` };
+    }
+
     default:
       throw new Error(`Unknown proposal type "${proposal.type}" — refusing to execute.`);
   }

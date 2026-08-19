@@ -15,6 +15,7 @@ const HEADINGS = {
   automation_idea: ':bulb: Automation idea',
   pm_agent_issue: ':robot_face: PM Agent bug / idea',
   canvas_update: ':scroll: Channel canvas',
+  channel_message: ':speech_balloon: Internal message',
 };
 
 /**
@@ -125,6 +126,17 @@ function summarizePayload(proposal) {
       const lines = [`*Channel:* <#${p.channelId}>`, `*Action:* ${action}`];
       if (p.title) lines.push(`*Title:* ${p.title}`);
       lines.push(`*Content:*\n${preview}`);
+      return lines.join('\n');
+    }
+    case 'channel_message': {
+      const lines = [`*Channel:* <#${p.channelId}>`];
+      if (p.mentionIds?.length) {
+        // Show WHO gets pinged as plain names — rendering <@ID> here would
+        // notify them off the approval card, before anyone approved it.
+        lines.push(`*Mentions:* ${p.mentionNames.join(', ')}`);
+      }
+      if (p.threadTs) lines.push('*Posting:* as a reply in an existing thread');
+      lines.push(`*Message:*\n${p.text}`);
       return lines.join('\n');
     }
     default:

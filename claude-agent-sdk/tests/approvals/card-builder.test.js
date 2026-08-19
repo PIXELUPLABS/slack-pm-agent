@@ -21,6 +21,24 @@ function taskProposal() {
   };
 }
 
+/** @returns {import('../../approvals/store.js').Proposal} */
+function channelMessageProposal(payload = {}) {
+  return {
+    id: 'p-2',
+    type: 'channel_message',
+    payload: {
+      channelId: 'C0VARICKINT',
+      text: 'please drop a Varick update',
+      mentionIds: ['U0FARHAN', 'U0KRISH'],
+      mentionNames: ['U0FARHAN (not in the team roster)', 'Krish Savani'],
+      ...payload,
+    },
+    requesterId: 'U1',
+    status: 'pending',
+    createdAt: Date.now(),
+  };
+}
+
 describe('buildApprovalCard', () => {
   it('includes approve and reject buttons carrying the proposal id', () => {
     const blocks = buildApprovalCard(taskProposal());
@@ -106,5 +124,32 @@ describe('buildResolvedCard', () => {
   it('renders failed outcome', () => {
     const blocks = buildResolvedCard(taskProposal(), { outcome: 'failed', actorId: 'U2', detail: ':warning: boom' });
     assert.ok(blocks[0].text.text.includes('execution failed'));
+  });
+});
+
+describe('buildApprovalCard — channel_message', () => {
+  it('names the channel, the people, and the full message', () => {
+    const summary = buildApprovalCard(channelMessageProposal())[1].text.text;
+    assert.ok(summary.includes('<#C0VARICKINT>'));
+    assert.ok(summary.includes('Krish Savani'));
+    assert.ok(summary.includes('not in the team roster'));
+    assert.ok(summary.includes('please drop a Varick update'));
+  });
+
+  it('never renders live mention markup on a pending card', () => {
+    const summary = buildApprovalCard(channelMessageProposal())[1].text.text;
+    // A <@ID> here would notify people before anyone approved the card.
+    assert.ok(!summary.includes('<@U0FARHAN>'));
+    assert.ok(!summary.includes('<@U0KRISH>'));
+  });
+
+  it('omits the mentions line when nobody is tagged', () => {
+    const summary = buildApprovalCard(channelMessageProposal({ mentionIds: [], mentionNames: [] }))[1].text.text;
+    assert.ok(!summary.includes('*Mentions:*'));
+  });
+
+  it('flags a threaded reply so the approver knows where it lands', () => {
+    const summary = buildApprovalCard(channelMessageProposal({ threadTs: '9.9' }))[1].text.text;
+    assert.ok(summary.includes('as a reply in an existing thread'));
   });
 });
